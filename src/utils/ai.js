@@ -1,5 +1,20 @@
-// src/utils/ai.js
 import { useStore } from '../store/useStore.js';
+import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
+import { z } from 'zod';
+
+const subtasksSchema = z.object({
+  subtasks: z.array(z.object({
+    title: z.string().min(1),
+    estimate: z.number().min(0),
+    priority: z.enum(['ui', 'in', 'un', 'nn'])
+  }))
+});
+
+const analyticsSchema = z.object({
+  success: z.string(),
+  bottleneck: z.string(),
+  action: z.string()
+});
 
 /**
  * Кастомная ошибка — выбрасывается когда API-ключ не задан пользователем.
@@ -28,42 +43,146 @@ export const generateSubtasksWithAI = async (parentTaskTitle) => {
       ]
     }
     Поле estimate - число (часы). Поле priority - строго одно из: "ui", "in", "un", "nn".
-    Выведи ТОЛЬКО JSON. Никакого текста до или после. Не используй маркдаун-теги.
   `;
 
-  try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1 },
-        }),
+  let attempts = 0;
+  while (attempts < 3) {
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({
+        model: "gemini-2.5-flash",
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: SchemaType.OBJECT,
+            properties: {
+              subtasks: {
+                type: SchemaType.ARRAY,
+                items: {
+                  type: SchemaType.OBJECT,
+                  properties: {
+                    title: { type: SchemaType.STRING },
+                    estimate: { type: SchemaType.NUMBER },
+                    priority: { type: SchemaType.STRING, description: "Одно из: ui, in, un, nn" }
+                  },
+                  required: ["title", "estimate", "priority"]
+                }
+              }
+            },
+            required: ["subtasks"]
+          }
+        }
+      });
+
+      const result = await model.generateContent(prompt);
+      const content = result.response.text();
+
+      if (!content) throw new Error('Empty AI response');
+
+      const parsed = JSON.parse(content);
+      const validation = subtasksSchema.safeParse(parsed);
+      if (!validation.success) {
+        throw new Error('Данные ИИ не соответствуют бизнес-правилам');
       }
-    );
-
-    if (!response.ok) {
-      const errorBody = await response.json();
-      console.error('Google API Error Details:', errorBody);
-      throw new Error(`HTTP Error: ${response.status}`);
+      return validation.data.subtasks;
+    } catch (error) {
+      if (error instanceof MissingApiKeyError) throw error;
+      
+      attempts++;
+      if (attempts >= 3) {
+        throw new Error(`Сбой ИИ после 3 попыток: ${error.message}`);
+      }
+      console.warn(`[AI Retry] Попытка ${attempts} провалена, повторяем через ${1000 * Math.pow(2, attempts - 1)}мс...`);
+      await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempts - 1)));
     }
+  }
+};
 
-    const data = await response.json();
-    let content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+export const generateAnalyticsWithAI = async (periodDays) => {
+  const state = useStore.getState();
+  const apiKey = state.apiKey;
 
-    if (!content) throw new Error('Empty AI response');
+  if (!apiKey) {
+    throw new MissingApiKeyError();
+  }
 
-    // Бронебойная зачистка мусора на случай галлюцинаций парсера
-    content = content.replace(/```json/gi, '').replace(/```/gi, '').trim();
+  const cutoff = Date.now() - periodDays * 24 * 60 * 60 * 1000;
+  
+  // Aggregate rescheduling counts
+  const rescheduleCounts = {};
+  state.activityLogs.forEach(log => {
+    if (log.timestamp >= cutoff && log.type === 'rescheduled') {
+      rescheduleCounts[log.taskId] = (rescheduleCounts[log.taskId] || 0) + 1;
+    }
+  });
 
-    const parsed = JSON.parse(content);
-    return parsed.subtasks || [];
-  } catch (error) {
-    // Пробрасываем MissingApiKeyError без перехвата
-    if (error instanceof MissingApiKeyError) throw error;
-    console.error('Сбой генерации ИИ:', error);
-    return [];
+  const payload = { completed: [], stuck: [] };
+  
+  Object.values(state.byId).forEach(task => {
+    // Check completed
+    if (task.done && task.completedAt >= cutoff) {
+      payload.completed.push({ title: task.title });
+    } 
+    // Check stuck (active and rescheduled)
+    else if (!task.done && task.status === 'active' && rescheduleCounts[task.id]) {
+      payload.stuck.push({ title: task.title, times: rescheduleCounts[task.id] });
+    }
+  });
+
+  const prompt = `
+Ты — жесткий аналитик продуктивности. Проанализируй этот минималистичный список завершенных и "зависших" (переносимых) задач за последние ${periodDays} дней:
+${JSON.stringify(payload)}
+
+Сформируй вывод:
+1. success: Главный успех (1-2 коротких предложения о завершенных задачах)
+2. bottleneck: Узкое горлышко (укажи задачу или паттерн, который саботируется; обрати внимание на times - это количество переносов)
+3. action: Директивное действие (что нужно сделать завтра, чтобы пробить затор)
+
+Никаких приветствий. Строго по сути.
+  `;
+
+  let attempts = 0;
+  while (attempts < 3) {
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({
+        model: "gemini-2.5-flash",
+        generationConfig: {
+          temperature: 0.3,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: SchemaType.OBJECT,
+            properties: {
+              success: { type: SchemaType.STRING, description: "Главный успех" },
+              bottleneck: { type: SchemaType.STRING, description: "Узкое горлышко" },
+              action: { type: SchemaType.STRING, description: "Директивное действие" }
+            },
+            required: ["success", "bottleneck", "action"]
+          }
+        }
+      });
+
+      const result = await model.generateContent(prompt);
+      const content = result.response.text();
+
+      if (!content) throw new Error('Empty AI response');
+
+      const parsed = JSON.parse(content);
+      const validation = analyticsSchema.safeParse(parsed);
+      if (!validation.success) {
+        throw new Error('Данные ИИ не соответствуют бизнес-правилам');
+      }
+      return validation.data;
+    } catch (error) {
+      if (error instanceof MissingApiKeyError) throw error;
+      
+      attempts++;
+      if (attempts >= 3) {
+        throw new Error(`Сбой ИИ после 3 попыток: ${error.message}`);
+      }
+      console.warn(`[AI Retry] Попытка ${attempts} провалена, повторяем через ${1000 * Math.pow(2, attempts - 1)}мс...`);
+      await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempts - 1)));
+    }
   }
 };

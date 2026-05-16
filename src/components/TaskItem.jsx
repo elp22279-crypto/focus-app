@@ -1,4 +1,3 @@
-// src/components/TaskItem.jsx
 import React, { memo, useRef, useCallback, useState } from 'react';
 import { ChevronRight, ChevronDown, CheckCircle2, Circle, Clock, FastForward, Plus } from 'lucide-react';
 import { useStore } from '../store/useStore.js';
@@ -9,11 +8,23 @@ import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { InlineSubtaskEditor } from './InlineSubtaskEditor.jsx';
 
 const LONG_PRESS_MS = 400;
+const BASE_TOLERANCE_PX = 6;
 
-/** Тяжёлый отклик — вход в режим мультивыбора */
 const triggerHeavyImpact = async () => {
   try { await Haptics.impact({ style: ImpactStyle.Heavy }); } catch { /* web noop */ }
 };
+
+// ── Выделенный компонент для дочерних задач ────────────────────────────
+const SubtaskList = memo(({ childrenIds, level, forceExpanded }) => {
+  return (
+    <div className="border-l border-stone-700 ml-5 pl-2">
+      {childrenIds.map(childId => (
+        <TaskItem key={childId} id={childId} level={level + 1} forceExpanded={forceExpanded} />
+      ))}
+    </div>
+  );
+});
+SubtaskList.displayName = 'SubtaskList';
 
 export const TaskItem = memo(({ id, level = 0, forceExpanded = false, flatMode = false }) => {
   const task         = useStore(state => state.byId[id]);
@@ -30,7 +41,6 @@ export const TaskItem = memo(({ id, level = 0, forceExpanded = false, flatMode =
 
   const prog = useNodeProgress(id);
 
-  // ── Inline subtask editor state ──────────────────────────────────────────
   const [isAddingSubtask, setIsAddingSubtask] = useState(false);
 
   // ── Long-press refs ──────────────────────────────────────────────────────
@@ -42,9 +52,13 @@ export const TaskItem = memo(({ id, level = 0, forceExpanded = false, flatMode =
     if (lpTimer.current) { clearTimeout(lpTimer.current); lpTimer.current = null; }
   }, []);
 
-  const onTouchStart = useCallback((e) => {
+  const onPointerDown = useCallback((e) => {
+    // Only primary button (left click or touch)
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    if (e.target.closest('[data-no-longpress="true"]')) return;
+    
     lpFired.current = false;
-    startPos.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    startPos.current = { x: e.clientX, y: e.clientY };
     lpTimer.current = setTimeout(async () => {
       lpFired.current = true;
       await triggerHeavyImpact();
@@ -52,13 +66,16 @@ export const TaskItem = memo(({ id, level = 0, forceExpanded = false, flatMode =
     }, LONG_PRESS_MS);
   }, [id]);
 
-  const onTouchMove = useCallback((e) => {
-    const dx = Math.abs(e.touches[0].clientX - startPos.current.x);
-    const dy = Math.abs(e.touches[0].clientY - startPos.current.y);
-    if (dx > 8 || dy > 8) cancelLP();
+  const onPointerMove = useCallback((e) => {
+    if (!lpTimer.current) return;
+    const dx = Math.abs(e.clientX - startPos.current.x);
+    const dy = Math.abs(e.clientY - startPos.current.y);
+    const tolerance = BASE_TOLERANCE_PX * (window.devicePixelRatio || 1);
+    if (dx > tolerance || dy > tolerance) cancelLP();
   }, [cancelLP]);
 
-  const onTouchEnd = useCallback(() => { cancelLP(); }, [cancelLP]);
+  const onPointerUp = useCallback(() => { cancelLP(); }, [cancelLP]);
+  const onPointerCancel = useCallback(() => { cancelLP(); }, [cancelLP]);
 
   // В режиме выделения тап = тоггл выбора
   const handleCardClick = useCallback(() => {
@@ -74,6 +91,35 @@ export const TaskItem = memo(({ id, level = 0, forceExpanded = false, flatMode =
     e.stopPropagation();
     triggerLightImpact();
     setIsAddingSubtask(true);
+  }, []);
+
+  const handleToggleExpand = useCallback((e) => {
+    e.stopPropagation();
+    triggerLightImpact();
+    toggleExpand(id);
+  }, [id, toggleExpand]);
+
+  const handleToggleDone = useCallback((e) => {
+    e.stopPropagation();
+    if (!task.done) triggerSuccess(); else triggerLightImpact();
+    toggleDone(id);
+  }, [id, task?.done, toggleDone]);
+
+  const handleRepeatClick = useCallback((e) => {
+    e.stopPropagation();
+    triggerLightImpact();
+    handleRepeatNext(id);
+  }, [id, handleRepeatNext]);
+
+  const handleSubtaskSave = useCallback(() => {
+    setIsAddingSubtask(false);
+    if (!expanded && !forceExpanded) {
+      useStore.getState().toggleExpand(id);
+    }
+  }, [id, expanded, forceExpanded]);
+
+  const handleSubtaskCancel = useCallback(() => {
+    setIsAddingSubtask(false);
   }, []);
 
   if (!task) return null;
@@ -96,7 +142,6 @@ export const TaskItem = memo(({ id, level = 0, forceExpanded = false, flatMode =
   const isExpanded  = forceExpanded || expanded;
   const prio        = PRIORITIES[task.priority] || PRIORITIES['nn'];
 
-  // ── Стили карточки ───────────────────────────────────────────────────────
   const cardBase  = 'flex items-center gap-2 p-3 rounded-xl border shadow-md transition-all cursor-pointer select-none';
   const cardLevel = level > 0 ? 'ml-4 border-l-4 border-l-stone-600' : '';
   const cardState = task.done
@@ -109,21 +154,16 @@ export const TaskItem = memo(({ id, level = 0, forceExpanded = false, flatMode =
 
   return (
     <div
-      className="mt-2 relative"
-      onTouchStart={onTouchStart}
-      onTouchMove={onTouchMove}
-      onTouchEnd={onTouchEnd}
+      className="mt-2 relative touch-none"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
     >
-      <div
-        onClick={handleCardClick}
-        className={`${cardBase} ${cardLevel} ${cardState}`}
-      >
-        {/* ── Чекбокс-маркер мультивыбора / раскрытие дерева ─────────── */}
+      <div onClick={handleCardClick} className={`${cardBase} ${cardLevel} ${cardState}`}>
         {isSelecting ? (
           <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-all ${
-            isSelected
-              ? 'bg-blue-500 border-blue-400 shadow-[0_0_8px_rgba(59,130,246,0.6)]'
-              : 'border-stone-500 bg-stone-900'
+            isSelected ? 'bg-blue-500 border-blue-400 shadow-[0_0_8px_rgba(59,130,246,0.6)]' : 'border-stone-500 bg-stone-900'
           }`}>
             {isSelected && (
               <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 12 12">
@@ -133,37 +173,28 @@ export const TaskItem = memo(({ id, level = 0, forceExpanded = false, flatMode =
           </div>
         ) : (
           hasChildren && !forceExpanded && !flatMode ? (
-            <button onClick={(e) => { e.stopPropagation(); triggerLightImpact(); toggleExpand(id); }} className="p-1 flex-shrink-0">
-              {isExpanded
-                ? <ChevronDown  className="w-4 h-4 text-stone-500" />
-                : <ChevronRight className="w-4 h-4 text-amber-600" />}
+            <button
+              onClick={handleToggleExpand}
+              className="p-1 flex-shrink-0"
+              data-no-longpress="true"
+            >
+              {isExpanded ? <ChevronDown className="w-4 h-4 text-stone-500" /> : <ChevronRight className="w-4 h-4 text-amber-600" />}
             </button>
           ) : <div className="w-6 flex-shrink-0" />
         )}
 
-        {/* ── Чекбокс выполнения (скрыт в режиме выбора) ─────────────── */}
         {!isSelecting && (
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              if (!task.done) triggerSuccess(); else triggerLightImpact();
-              toggleDone(id);
-            }}
+            onClick={handleToggleDone}
             className="flex-shrink-0"
+            data-no-longpress="true"
           >
-            {task.done
-              ? <CheckCircle2 className="w-5 h-5 text-emerald-600 drop-shadow-[0_0_5px_rgba(5,150,105,0.8)]" />
-              : <Circle className="w-5 h-5 text-stone-600" />}
+            {task.done ? <CheckCircle2 className="w-5 h-5 text-emerald-600 drop-shadow-[0_0_5px_rgba(5,150,105,0.8)]" /> : <Circle className="w-5 h-5 text-stone-600" />}
           </button>
         )}
 
-        {/* ── Контент задачи ──────────────────────────────────────────── */}
         <div className="flex-1 min-w-0">
-          <div className={`text-sm font-bold truncate ${
-            task.done    ? 'line-through text-stone-500'
-            : isSelected ? 'text-blue-200'
-            : 'text-stone-200'
-          }`}>
+          <div className={`text-sm font-bold truncate ${task.done ? 'line-through text-stone-500' : isSelected ? 'text-blue-200' : 'text-stone-200'}`}>
             {task.title || 'Новая задача...'}
           </div>
           <div className="flex gap-2 mt-1.5 items-center flex-wrap">
@@ -182,8 +213,9 @@ export const TaskItem = memo(({ id, level = 0, forceExpanded = false, flatMode =
             )}
             {task.repeatType && task.repeatType !== 'none' && !task.parentId && !task.done && (
               <button
-                onClick={(e) => { e.stopPropagation(); triggerLightImpact(); handleRepeatNext(id); }}
+                onClick={handleRepeatClick}
                 className="text-[10px] font-bold text-amber-800 bg-amber-500 px-1.5 py-0.5 rounded flex items-center shadow-[inset_0_1px_1px_rgba(255,255,255,0.5)] active:scale-95 transition-all"
+                data-no-longpress="true"
               >
                 <FastForward className="w-3 h-3 mr-1" /> Повтор
               </button>
@@ -191,41 +223,30 @@ export const TaskItem = memo(({ id, level = 0, forceExpanded = false, flatMode =
           </div>
         </div>
 
-        {/* ── Кнопка «+» добавить подзадачу ──────────────────────────── */}
         {!task.done && !isSelecting && (
           <button
             onClick={handleAddSubtask}
             className="flex-shrink-0 p-1.5 rounded-lg bg-stone-700/50 hover:bg-stone-600/70 border border-stone-600/50 transition-all active:scale-95"
             aria-label="Добавить подзадачу"
+            data-no-longpress="true"
           >
             <Plus className="w-3.5 h-3.5 text-stone-400 hover:text-amber-400" />
           </button>
         )}
       </div>
 
-      {/* ── Дочерние задачи ─────────────────────────────────────────────── */}
       {hasChildren && isExpanded && !flatMode && (
-        <div className="border-l border-stone-700 ml-5 pl-2">
-          {displayChildrenIds.map(childId =>
-            <TaskItem key={childId} id={childId} level={level + 1} forceExpanded={forceExpanded} />
-          )}
-        </div>
+        <SubtaskList childrenIds={displayChildrenIds} level={level} forceExpanded={forceExpanded} />
       )}
 
-      {/* ── Inline-редактор создания подзадачи ──────────────────────────── */}
       {isAddingSubtask && (
         <InlineSubtaskEditor
           parentTask={task}
-          onSave={() => {
-            setIsAddingSubtask(false);
-            // Раскрываем дерево, чтобы была видна новая подзадача
-            if (!expanded && !forceExpanded) {
-              useStore.getState().toggleExpand(id);
-            }
-          }}
-          onCancel={() => setIsAddingSubtask(false)}
+          onSave={handleSubtaskSave}
+          onCancel={handleSubtaskCancel}
         />
       )}
     </div>
   );
 });
+TaskItem.displayName = 'TaskItem';

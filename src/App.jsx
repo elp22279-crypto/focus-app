@@ -122,6 +122,16 @@ FocusApp.displayName = 'FocusApp';
 
 // ── Корень ───────────────────────────────────────────────────────────────────
 export default function App() {
+  const _hasHydrated = useStore(state => state._hasHydrated);
+
+  if (!_hasHydrated) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-stone-950">
+        <div className="w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    );
+  }
+
   return (
     <ErrorBoundary>
       <NotificationSync />

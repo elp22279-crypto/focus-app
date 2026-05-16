@@ -10,6 +10,7 @@ import { PRIORITIES } from '../utils/constants.js';
 import { calculatePoints } from '../utils/helpers.js';
 import { generateSubtasksWithAI, MissingApiKeyError } from '../utils/ai.js';
 import { triggerLightImpact, triggerMediumImpact, triggerSuccess, triggerWarning } from '../utils/haptics.js';
+import { Toast } from '@capacitor/toast';
 
 const getDescendants = (id, byId) => {
   const t = byId[id];
@@ -118,11 +119,17 @@ export const TaskEditor = () => {
           parentId: task.id, status: draft.status || task.status,
           date: draft.date || task.date, skipEdit: true
         }));
-      } else { triggerWarning(); alert('Сбой ИИ: Проверьте консоль или VPN'); }
+      } else { 
+        triggerWarning(); 
+        await Toast.show({ text: 'Не удалось сгенерировать подзадачи. Повторите попытку.', duration: 'long' }); 
+      }
     } catch (err) {
       if (err instanceof MissingApiKeyError) {
         triggerWarning(); saveCurrentTask(); updateUI({ editingNodeId: null, showSettings: true });
-      } else { triggerWarning(); console.error('Сбой ИИ:', err); alert('Сбой ИИ: Проверьте консоль или VPN'); }
+      } else { 
+        triggerWarning(); 
+        await Toast.show({ text: err.message || 'Сбой генерации ИИ', duration: 'long' }); 
+      }
     } finally { setIsAiLoading(false); }
   };
 
@@ -148,8 +155,6 @@ export const TaskEditor = () => {
         {[
           { label: 'Сегодня', days: 0 },
           { label: 'Завтра',  days: 1 },
-          { label: '+3 дня',  days: 3 },
-          { label: '+7 дней', days: 7 },
           { label: 'Сброс',   days: null },
         ].map(({ label, days }) => {
           let target = null;

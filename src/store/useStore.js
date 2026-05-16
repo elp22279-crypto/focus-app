@@ -33,23 +33,18 @@ const secureWrite = async (value) => {
   }
 };
 
-const debounce = (fn, ms) => {
-  let timeoutId;
-  return function (...args) {
-    clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => fn.apply(this, args), ms);
-  };
-};
+import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval';
 
-const debouncedSetItem = debounce((name, value) => {
-  try { localStorage.setItem(name, value); }
-  catch (e) { console.error('Storage quota exceeded', e); }
-}, 1000);
-
-const customStorage = createJSONStorage(() => ({
-  getItem: (name) => localStorage.getItem(name),
-  setItem: debouncedSetItem,
-  removeItem: (name) => localStorage.removeItem(name),
+const idbStorage = createJSONStorage(() => ({
+  getItem: async (name) => {
+    return (await idbGet(name)) || null;
+  },
+  setItem: async (name, value) => {
+    await idbSet(name, value);
+  },
+  removeItem: async (name) => {
+    await idbDel(name);
+  },
 }));
 
 
@@ -61,6 +56,14 @@ export const useStore = create(
       categories: ['Работа', 'Личное', 'Учеба', 'Здоровье'],
       activityLogs: [],
       settings: { dailyLimit: 6, retentionMonths: 3, goals: { daily: 100, weekly: 500, monthly: 2000 } },
+
+      aiAnalyticsCache: {},
+      setAiAnalyticsCache: (period, data) => set(s => ({ 
+        aiAnalyticsCache: { ...s.aiAnalyticsCache, [period]: { timestamp: Date.now(), data } } 
+      })),
+
+      _hasHydrated: false,
+      setHasHydrated: (status) => set({ _hasHydrated: status }),
 
       // API-ключ хранится в памяти; персистентность — через secureWrite/secureRead,
       // НЕ через основной localStorage-бандл.
@@ -80,18 +83,18 @@ export const useStore = create(
       },
 
       // ── Undo/Snackbar ──────────────────────────────────────────────────
-      // { type: 'delete'|'complete', taskSnapshot, timeoutId } | null
+      // Record<taskId, { type: 'delete'|'complete', taskSnapshot, timeoutId, startedAt }>
       // НЕ персистируется (timeoutId не сериализуем).
-      pendingAction: null,
+      pendingActions: {},
 
       /** @private — зафиксировать отложенное действие немедленно */
-      _commitPending: () => {
-        const { pendingAction } = get();
-        if (!pendingAction) return;
-        clearTimeout(pendingAction.timeoutId);
+      _commitPending: (id) => {
+        const action = get().pendingActions[id];
+        if (!action) return;
+        clearTimeout(action.timeoutId);
 
-        if (pendingAction.type === 'delete') {
-          const { taskSnapshot } = pendingAction;
+        if (action.type === 'delete') {
+          const { taskSnapshot } = action;
           set((state) => {
             const idsToDelete = [taskSnapshot.id, ...getDescendantIds(taskSnapshot.id, state.byId)];
             const newById = { ...state.byId };
@@ -104,10 +107,12 @@ export const useStore = create(
               };
             }
             const newLogs = [...state.activityLogs, { id: generateId(), type: 'deleted', taskId: taskSnapshot.id, timestamp: Date.now(), points: 0 }];
-            return { byId: newById, rootIds: newRootIds, activityLogs: newLogs, pendingAction: null };
+            const newPending = { ...state.pendingActions };
+            delete newPending[id];
+            return { byId: newById, rootIds: newRootIds, activityLogs: newLogs, pendingActions: newPending };
           });
-        } else if (pendingAction.type === 'complete') {
-          const { taskSnapshot } = pendingAction;
+        } else if (action.type === 'complete') {
+          const { taskSnapshot } = action;
           set((state) => {
             const newById = { ...state.byId };
             // Удаляем флаг isHidden, оставляем done: true
@@ -115,22 +120,24 @@ export const useStore = create(
               newById[taskSnapshot.id] = { ...newById[taskSnapshot.id], isHidden: false };
             }
             const newLog = { id: generateId(), type: 'completed', taskId: taskSnapshot.id, timestamp: Date.now(), points: calculatePoints(taskSnapshot.estimate) };
-            return { byId: newById, activityLogs: [...state.activityLogs, newLog], pendingAction: null };
+            const newPending = { ...state.pendingActions };
+            delete newPending[id];
+            return { byId: newById, activityLogs: [...state.activityLogs, newLog], pendingActions: newPending };
           });
         }
       },
 
       /** Отменить последнее деструктивное действие */
-      undoAction: () => {
-        const { pendingAction } = get();
-        if (!pendingAction) return;
-        clearTimeout(pendingAction.timeoutId);
-        const { taskSnapshot } = pendingAction;
+      undoAction: (id) => {
+        const action = get().pendingActions[id];
+        if (!action) return;
+        clearTimeout(action.timeoutId);
+        const { taskSnapshot } = action;
         set((state) => {
           const newById = { ...state.byId };
           if (newById[taskSnapshot.id]) {
             // Снять скрытие и (если complete) вернуть done: false
-            if (pendingAction.type === 'complete') {
+            if (action.type === 'complete') {
               newById[taskSnapshot.id] = { ...taskSnapshot, isHidden: false };
             } else {
               // delete: восстановить видимость
@@ -141,7 +148,9 @@ export const useStore = create(
               });
             }
           }
-          return { byId: newById, pendingAction: null };
+          const newPending = { ...state.pendingActions };
+          delete newPending[id];
+          return { byId: newById, pendingActions: newPending };
         });
       },
 
@@ -210,9 +219,6 @@ export const useStore = create(
         const task = state.byId[id];
         if (!task) return;
 
-        // Если есть отложенное действие — зафиксировать его немедленно
-        if (state.pendingAction) state._commitPending();
-
         // Пометить задачу и всех потомков как скрытые (soft-delete)
         const idsToHide = [id, ...getDescendantIds(id, get().byId)];
         set((s) => {
@@ -225,8 +231,13 @@ export const useStore = create(
         });
 
         // Запланировать реальное удаление через 3 сек
-        const timeoutId = setTimeout(() => get()._commitPending(), 3000);
-        set({ pendingAction: { type: 'delete', taskSnapshot: task, timeoutId } });
+        const timeoutId = setTimeout(() => get()._commitPending(id), 3000);
+        set(s => ({
+          pendingActions: {
+            ...s.pendingActions,
+            [id]: { type: 'delete', taskSnapshot: task, timeoutId, startedAt: Date.now() }
+          }
+        }));
       },
 
       toggleDone: (id) => {
@@ -269,14 +280,17 @@ export const useStore = create(
         }
 
         // ── Обычное завершение: soft-скрытие + undo-окно 3 сек ────────
-        if (state.pendingAction) state._commitPending();
-
         set((s) => ({
           byId: { ...s.byId, [id]: { ...task, done: true, completedAt: Date.now(), isHidden: true } }
         }));
 
-        const timeoutId = setTimeout(() => get()._commitPending(), 3000);
-        set({ pendingAction: { type: 'complete', taskSnapshot: task, timeoutId } });
+        const timeoutId = setTimeout(() => get()._commitPending(id), 3000);
+        set(s => ({
+          pendingActions: {
+            ...s.pendingActions,
+            [id]: { type: 'complete', taskSnapshot: task, timeoutId, startedAt: Date.now() }
+          }
+        }));
       },
 
       handleRepeatNext: (id) => set((state) => {
@@ -371,15 +385,14 @@ export const useStore = create(
        * @param {{ byId: object, rootIds: string[], activityLogs: any[] }} backup
        */
       restoreBackup: ({ byId, rootIds, activityLogs }) => {
-        // Отменяем любые ожидающие undo-таймеры перед перезаписью
-        const { pendingAction } = get();
-        if (pendingAction) clearTimeout(pendingAction.timeoutId);
+        const { pendingActions } = get();
+        Object.values(pendingActions).forEach(action => clearTimeout(action.timeoutId));
 
         set((state) => ({
           byId,
           rootIds,
           activityLogs: activityLogs || [],
-          pendingAction: null,
+          pendingActions: {},
           ui: {
             ...state.ui,
             editingNodeId: null,
@@ -391,11 +404,28 @@ export const useStore = create(
     }),
     { 
       name: 'focus-app-v4', 
-      storage: customStorage,
-      // Явно исключаем apiKey и undo-состояние из localStorage-персистентности.
+      storage: idbStorage,
+      onRehydrateStorage: () => {
+        return async (state, error) => {
+          if (error) {
+            console.error('Store hydration error:', error);
+          }
+          if (state) {
+            try {
+              await state.loadApiKey();
+            } catch (err) {
+              console.error('Error loading API key:', err);
+            }
+            state.setHasHydrated(true);
+          } else {
+            useStore.setState({ _hasHydrated: true });
+          }
+        };
+      },
+      // Явно исключаем apiKey и undo-состояние из персистентности.
       partialize: (state) => {
         // eslint-disable-next-line no-unused-vars
-        const { apiKey, loadApiKey, setApiKey, pendingAction, _commitPending, undoAction, ...rest } = state;
+        const { _hasHydrated, setHasHydrated, apiKey, loadApiKey, setApiKey, pendingActions, _commitPending, undoAction, ...rest } = state;
         return rest;
       },
       merge: (persistedState, currentState) => {
@@ -410,9 +440,9 @@ export const useStore = create(
           ...currentState,
           ...persistedState,
           byId: cleanById,
-          // apiKey и pendingAction никогда не берём из persistedState
+          // apiKey и pendingActions никогда не берём из persistedState
           apiKey: null,
-          pendingAction: null,
+          pendingActions: {},
           ui: {
             ...currentState.ui,
             ...(persistedState.ui || {}),

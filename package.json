@@ -17,10 +17,14 @@
     "@capacitor/local-notifications": "^8.1.0",
     "@capacitor/preferences": "^8.0.1",
     "@capacitor/share": "^8.0.1",
+    "@capacitor/toast": "^8.0.1",
+    "@google/generative-ai": "^0.24.1",
+    "idb-keyval": "^6.2.2",
     "lucide-react": "^1.14.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "uuid": "^14.0.0",
+    "zod": "^4.4.3",
     "zustand": "^5.0.13"
   },
   "devDependencies": {
