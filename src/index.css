@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Кастомный скроллбар для нашей темной темы, чтобы скрыть уродливый системный ползунок в редакторе */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #44403c; /* stone-700 */
+  border-radius: 20px;
+}
