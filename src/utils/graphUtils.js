@@ -37,9 +37,10 @@ export const getDescendantIds = (rootId, byId) => {
  *
  * @param {string[]} rootIds  — ID корневых узлов (видимых в конкретном виде)
  * @param {Object}   byId     — плоский словарь задач
+ * @param {boolean}  includeDone — включать ли завершённые задачи
  * @returns {Map<string, number>}  — { taskId → суммарная нагрузка ветки }
  */
-export const buildBranchLoadMap = (rootIds, byId) => {
+export const buildBranchLoadMap = (rootIds, byId, includeDone = false) => {
   const loadMap = new Map();
 
   for (const rootId of rootIds) {
@@ -62,7 +63,7 @@ export const buildBranchLoadMap = (rootIds, byId) => {
     for (let i = order.length - 1; i >= 0; i--) {
       const id   = order[i];
       const task = byId[id];
-      if (!task || task.done) { loadMap.set(id, 0); continue; }
+      if (!task || (!includeDone && task.done)) { loadMap.set(id, 0); continue; }
 
       const selfLoad = task.estimate || 0;
       const childrenLoad = task.childrenIds?.reduce(
@@ -114,4 +115,23 @@ export const calcNodeProgress = (rootId, byId) => {
   if (task.done) completed = total;
 
   return { total, completed, isParent: true };
+};
+
+/**
+ * Возвращает полный путь к задаче от корня.
+ * @param {string} taskId
+ * @param {Object} byId
+ * @returns {string[]} массив названий задач от корневой до родительской
+ */
+export const getTaskPath = (taskId, byId) => {
+  const path = [];
+  let currentId = taskId;
+  while (currentId) {
+    const t = byId[currentId];
+    if (!t) break;
+    // Вставляем в начало, чтобы путь был от корня к листу
+    path.unshift(t.title);
+    currentId = t.parentId;
+  }
+  return path;
 };

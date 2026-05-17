@@ -172,7 +172,7 @@ export const useStore = create(
         const id = generateId();
         const newTask = {
           id, title: payload.title || '', estimate: payload.estimate || 0, done: false,
-          status: payload.status || 'active', date: payload.date || null, deadline: payload.deadline || null,
+          description: payload.description || '', status: payload.status || 'active', date: payload.date || null, deadline: payload.deadline || null,
           time: payload.time || null, category: payload.category || null, priority: payload.priority || 'nn',
           repeatType: payload.repeatType || 'none', repeatDays: payload.repeatDays || [],
           repeatMonthDay: payload.repeatMonthDay || null, completedAt: null, parentId: payload.parentId || null, childrenIds: []
@@ -239,6 +239,64 @@ export const useStore = create(
           }
         }));
       },
+
+      duplicateTask: (id) => set((state) => {
+        const original = state.byId[id];
+        if (!original) return state;
+
+        const newById = { ...state.byId };
+        let newRootIds = [...state.rootIds];
+        const newLogs = [...state.activityLogs];
+
+        const descendants = getDescendantIds(id, state.byId);
+        const allOriginalIds = [id, ...descendants];
+
+        const idMap = {};
+        allOriginalIds.forEach(oldId => { idMap[oldId] = generateId(); });
+
+        const newRootCloneId = idMap[id];
+
+        allOriginalIds.forEach(oldId => {
+          const oldTask = state.byId[oldId];
+          const newId = idMap[oldId];
+          
+          const clonedTask = {
+            ...oldTask,
+            id: newId,
+            done: false,
+            isHidden: false,
+            completedAt: null,
+            createdAt: Date.now()
+          };
+
+          if (oldId === id) {
+            clonedTask.parentId = oldTask.parentId;
+          } else {
+            if (oldTask.parentId && idMap[oldTask.parentId]) {
+              clonedTask.parentId = idMap[oldTask.parentId];
+            }
+          }
+
+          if (oldTask.childrenIds && oldTask.childrenIds.length > 0) {
+            clonedTask.childrenIds = oldTask.childrenIds.map(cId => idMap[cId] || cId);
+          } else {
+            clonedTask.childrenIds = [];
+          }
+
+          newById[newId] = clonedTask;
+        });
+
+        if (original.parentId && newById[original.parentId]) {
+          newById[original.parentId] = {
+            ...newById[original.parentId],
+            childrenIds: [...newById[original.parentId].childrenIds, newRootCloneId]
+          };
+        } else {
+          newRootIds.push(newRootCloneId);
+        }
+
+        return { byId: newById, rootIds: newRootIds, activityLogs: newLogs };
+      }),
 
       toggleDone: (id) => {
         const state = get();

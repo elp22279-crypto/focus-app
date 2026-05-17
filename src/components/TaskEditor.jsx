@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   X, ArrowLeft, BarChart3, Repeat, Plus, Edit2, Trash2, Bot,
-  CalendarDays, Target, FolderOpen, Clock, ChevronRight
+  CalendarDays, Target, FolderOpen, Clock, ChevronRight, Search, Copy
 } from 'lucide-react';
 import { useStore } from '../store/useStore.js';
 import { useNodeProgress } from '../store/selectors.js';
@@ -11,6 +11,7 @@ import { calculatePoints } from '../utils/helpers.js';
 import { generateSubtasksWithAI, MissingApiKeyError } from '../utils/ai.js';
 import { triggerLightImpact, triggerMediumImpact, triggerSuccess, triggerWarning } from '../utils/haptics.js';
 import { Toast } from '@capacitor/toast';
+import { getTaskPath } from '../utils/graphUtils.js';
 
 const getDescendants = (id, byId) => {
   const t = byId[id];
@@ -65,14 +66,30 @@ export const TaskEditor = () => {
 
   const prog = useNodeProgress(editingNodeId);
 
-  const [draft, setDraft]           = useState(task || {});
+  const [draft, setDraft] = useState(() => {
+    if (task) {
+      if (!task.description) {
+        return { ...task, description: "**Зачем:**\n\n**Результат:**\n\n**Доп. инфо:**\n" };
+      }
+      return task;
+    }
+    return {};
+  });
   const [newSubTitle, setNewSubTitle] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
+  const [isParentModalOpen, setIsParentModalOpen] = useState(false);
+  const [parentSearchQuery, setParentSearchQuery] = useState('');
   // 'none' | 'date' | 'priority' | 'project'
   const [activeMenu, setActiveMenu] = useState('none');
 
   useEffect(() => {
-    if (task) setDraft(task);
+    if (task) {
+      if (!task.description) {
+        setDraft({ ...task, description: "**Зачем:**\n\n**Результат:**\n\n**Доп. инфо:**\n" });
+      } else {
+        setDraft(task);
+      }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task?.id]);
 
@@ -136,6 +153,10 @@ export const TaskEditor = () => {
   const descendants  = getDescendants(task.id, useStore.getState().byId);
   const validParents = Object.values(useStore.getState().byId)
     .filter(n => n.id !== task.id && !descendants.includes(n.id));
+
+  const filteredParents = parentSearchQuery.trim()
+    ? validParents.filter(p => p.title.toLowerCase().includes(parentSearchQuery.toLowerCase()))
+    : validParents;
 
   const totalMins = Math.round((draft.estimate || 0) * 60);
   const estHours  = Math.floor(totalMins / 60);
@@ -232,20 +253,13 @@ export const TaskEditor = () => {
       <MenuHeader title="Проект / Родитель" onClose={closeMenu} />
       <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-1">
         <button
-          onClick={() => { triggerLightImpact(); setDraft({ ...draft, parentId: null }); closeMenu(); }}
-          className={`px-3 py-2 rounded-xl border text-[10px] font-black whitespace-nowrap flex-shrink-0 transition-all ${
-            !draft.parentId ? 'bg-violet-900/50 border-violet-700 text-violet-300' : 'bg-stone-900 border-stone-700 text-stone-400'
+          onClick={() => { triggerLightImpact(); setIsParentModalOpen(true); }}
+          className={`px-3 py-2 rounded-xl border text-[10px] font-black whitespace-nowrap flex-shrink-0 max-w-[140px] truncate transition-all ${
+            draft.parentId ? 'bg-violet-900/50 border-violet-700 text-violet-300' : 'bg-stone-900 border-stone-700 text-stone-400 hover:border-stone-600'
           }`}
-        >— Без родителя</button>
-        {validParents.map(n => (
-          <button
-            key={n.id}
-            onClick={() => { triggerLightImpact(); setDraft({ ...draft, parentId: n.id }); closeMenu(); }}
-            className={`px-3 py-2 rounded-xl border text-[10px] font-black whitespace-nowrap flex-shrink-0 max-w-[140px] truncate transition-all ${
-              draft.parentId === n.id ? 'bg-violet-900/50 border-violet-700 text-violet-300' : 'bg-stone-900 border-stone-700 text-stone-400'
-            }`}
-          >{n.title}</button>
-        ))}
+        >
+          {draft.parentId ? useStore.getState().byId[draft.parentId]?.title : '— Без родителя'}
+        </button>
         {/* Категория */}
         <div className="flex items-center gap-1 flex-shrink-0 border-l border-stone-700 pl-2">
           <span className="text-[9px] text-stone-500 font-black whitespace-nowrap">Кат.:</span>
@@ -394,15 +408,22 @@ export const TaskEditor = () => {
             </div>
           )}
 
-          {/* Название */}
+          {/* Название и Описание */}
           <div className="bg-stone-800 p-4 rounded-xl border border-stone-700">
             <label className="text-[9px] font-black text-amber-700 uppercase block mb-2 tracking-widest">Идентификатор</label>
             <input
               autoFocus
-              className="bg-transparent w-full font-bold text-stone-200 outline-none text-lg border-b border-stone-700 focus:border-amber-500 pb-1"
+              className="bg-transparent w-full font-bold text-stone-200 outline-none text-lg border-b border-stone-700 focus:border-amber-500 pb-1 mb-4"
               value={draft.title || ''}
               onChange={e => setDraft({ ...draft, title: e.target.value })}
               placeholder="Что нужно сделать?"
+            />
+            <label className="text-[9px] font-black text-amber-700 uppercase block mb-2 tracking-widest">Описание</label>
+            <textarea
+              className="bg-stone-900 w-full rounded-lg border border-stone-700 p-3 text-xs text-stone-300 font-medium outline-none focus:border-amber-500 min-h-[120px] resize-none"
+              value={draft.description || ''}
+              onChange={e => setDraft({ ...draft, description: e.target.value })}
+              placeholder="Детали задачи..."
             />
           </div>
 
@@ -461,6 +482,16 @@ export const TaskEditor = () => {
             <Trash2 className="w-5 h-5" />
           </button>
           <button
+            onClick={() => {
+              triggerLightImpact();
+              useStore.getState().duplicateTask(task.id);
+              updateUI({ editingNodeId: null });
+            }}
+            className="bg-purple-950/50 border border-purple-900 text-purple-500 p-4 rounded-xl hover:bg-purple-900 w-14 flex items-center justify-center flex-shrink-0"
+          >
+            <Copy className="w-5 h-5" />
+          </button>
+          <button
             onClick={saveAndClose}
             disabled={!draft.title?.trim()}
             className={`flex-1 p-4 rounded-xl font-black uppercase tracking-widest text-sm transition-all ${
@@ -474,6 +505,78 @@ export const TaskEditor = () => {
         </div>
 
       </div>
+
+      {/* ── Модальное окно поиска родителя ───────────────────────────── */}
+      {isParentModalOpen && (
+        <div className="fixed inset-0 z-[60] bg-stone-950 flex flex-col animate-in slide-in-from-bottom duration-300">
+          <div className="flex items-center gap-3 p-4 border-b border-stone-800 bg-stone-900 flex-shrink-0">
+            <button
+              onClick={() => { triggerLightImpact(); setIsParentModalOpen(false); setParentSearchQuery(''); }}
+              className="p-2 bg-stone-800 rounded-full hover:bg-stone-700 text-stone-400"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <div className="flex-1 relative">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-stone-500" />
+              <input
+                autoFocus
+                type="search"
+                className="w-full bg-stone-800 border border-stone-700 rounded-xl py-2 pl-9 pr-4 text-sm text-stone-200 outline-none focus:border-amber-700"
+                placeholder="Поиск родительской задачи..."
+                value={parentSearchQuery}
+                onChange={e => setParentSearchQuery(e.target.value)}
+              />
+            </div>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto p-4 space-y-2 pb-10">
+            <button
+              onClick={() => {
+                triggerLightImpact();
+                setDraft({ ...draft, parentId: null });
+                setIsParentModalOpen(false);
+                setParentSearchQuery('');
+              }}
+              className={`w-full text-left p-3 rounded-xl border transition-all ${
+                !draft.parentId ? 'bg-violet-900/30 border-violet-800 text-violet-300' : 'bg-stone-900 border-stone-800 text-stone-300 hover:bg-stone-800/80'
+              }`}
+            >
+              <div className="text-sm font-bold">— Без родителя</div>
+            </button>
+
+            {filteredParents.map(p => {
+              const path = getTaskPath(p.id, useStore.getState().byId);
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    triggerLightImpact();
+                    setDraft({ ...draft, parentId: p.id });
+                    setIsParentModalOpen(false);
+                    setParentSearchQuery('');
+                  }}
+                  className={`w-full text-left p-3 rounded-xl border transition-all ${
+                    draft.parentId === p.id ? 'bg-violet-900/30 border-violet-800' : 'bg-stone-900 border-stone-800 hover:bg-stone-800/80'
+                  }`}
+                >
+                  <div className="text-sm font-bold text-stone-200">{p.title}</div>
+                  {path.length > 0 && (
+                    <div className="text-[10px] font-medium text-stone-500 mt-1 truncate">
+                      {path.join(' > ')}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+            
+            {filteredParents.length === 0 && parentSearchQuery && (
+              <div className="text-center py-8 text-stone-500 text-sm">
+                Ничего не найдено
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

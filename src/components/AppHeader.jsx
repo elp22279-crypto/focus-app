@@ -34,18 +34,29 @@ const LoadBar = memo(() => {
   const dailyLimit = useStore(state => state.settings.dailyLimit);
   const { load, percentage } = useDailyLoad();
 
+  const diff = dailyLimit - load;
+  const isOverload = diff < 0;
+  const absDiff = Math.abs(diff);
+
+  const formatTime = (hours) => {
+    if (hours < 1 && hours > 0) return `${Math.round(hours * 60)}м`;
+    return `${Number(hours.toFixed(2))}ч`;
+  };
+
   return (
     <div className="bg-stone-950 p-2 rounded-xl border-2 border-stone-800">
       <div className="flex justify-between text-[9px] font-black text-stone-500 mb-2 uppercase tracking-widest px-1">
-        <span className={load > dailyLimit ? 'text-red-500' : 'text-purple-400'}>
-          ОСТАТОК: {Number(load.toFixed(2))}ч
-        </span>
+        {isOverload ? (
+          <span className="text-red-500">ПЕРЕГРУЗ: {formatTime(absDiff)}</span>
+        ) : (
+          <span className="text-purple-400">ОСТАТОК: {formatTime(absDiff)}</span>
+        )}
         <span className="text-amber-600">ПЛАН: {dailyLimit}ч</span>
       </div>
       <div className="h-3 w-full bg-stone-900 rounded-full overflow-hidden border border-stone-800 relative">
         <div
           className={`absolute top-0 left-0 bottom-0 transition-all duration-1000 ${
-            load > dailyLimit
+            isOverload
               ? 'bg-gradient-to-r from-red-800 to-red-500'
               : 'bg-gradient-to-r from-purple-800 to-purple-400'
           }`}

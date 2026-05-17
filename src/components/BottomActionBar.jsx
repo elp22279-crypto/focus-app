@@ -1,6 +1,6 @@
 // src/components/BottomActionBar.jsx
 import React, { memo, useState, useCallback, useMemo } from 'react';
-import { X, CalendarClock, CheckCheck, Trash2 } from 'lucide-react';
+import { X, CalendarClock, CheckCheck, Trash2, Copy } from 'lucide-react';
 import { useStore } from '../store/useStore.js';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -9,6 +9,7 @@ export const BottomActionBar = memo(() => {
   const clearTaskSelection  = useStore(state => state.clearTaskSelection);
   const updateMultipleTasks = useStore(state => state.updateMultipleTasks);
   const deleteTask          = useStore(state => state.deleteTask);
+  const duplicateTask       = useStore(state => state.duplicateTask);
 
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [rescheduleDate, setRescheduleDate] = useState('');
@@ -35,6 +36,11 @@ export const BottomActionBar = memo(() => {
     selectedTaskIds.forEach(id => deleteTask(id));
     clearTaskSelection();
   }, [selectedTaskIds, deleteTask, clearTaskSelection]);
+
+  const handleDuplicate = useCallback(() => {
+    selectedTaskIds.forEach(id => duplicateTask(id));
+    clearTaskSelection();
+  }, [selectedTaskIds, duplicateTask, clearTaskSelection]);
 
   const toggleDatePicker = useCallback(() => setShowDatePicker(v => !v), []);
   const closeDatePicker  = useCallback(() => { setShowDatePicker(false); setRescheduleDate(''); }, []);
@@ -85,6 +91,15 @@ export const BottomActionBar = memo(() => {
           >
             <CalendarClock className="w-5 h-5" />
             <span className="text-[9px] font-black uppercase tracking-widest">Перенести</span>
+          </button>
+
+          <button
+            id="multiselect-duplicate-btn"
+            onClick={handleDuplicate}
+            className="flex-1 flex flex-col items-center gap-1.5 py-4 text-purple-400 hover:bg-purple-950/40 transition-all border-r border-stone-700"
+          >
+            <Copy className="w-5 h-5" />
+            <span className="text-[9px] font-black uppercase tracking-widest">Копия</span>
           </button>
 
           <button

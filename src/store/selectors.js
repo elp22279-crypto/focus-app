@@ -105,7 +105,7 @@ export const useDailyLoad = () => {
     // Собираем видимые корневые задачи текущего дня
     const rootIds = Object.keys(byId).filter(id => {
       const t = byId[id];
-      if (!t || t.done || t.isHidden || t.status !== 'active' || t.date !== selectedDate) return false;
+      if (!t || t.isHidden || t.status !== 'active' || t.date !== selectedDate) return false;
       if (t.parentId && byId[t.parentId]?.date === selectedDate) return false;
       return true;
     });
@@ -116,8 +116,8 @@ export const useDailyLoad = () => {
       return { load, percentage: Math.min((load / dailyLimit) * 100, 100) };
     }
 
-    // Вычисляем через buildBranchLoadMap (итеративный DFS)
-    const loadMap = buildBranchLoadMap(rootIds, byId);
+    // Вычисляем через buildBranchLoadMap (итеративный DFS), включая завершенные (includeDone = true)
+    const loadMap = buildBranchLoadMap(rootIds, byId, true);
     let totalLoad = 0;
     for (const id of rootIds) {
       totalLoad += loadMap.get(id) ?? 0;
