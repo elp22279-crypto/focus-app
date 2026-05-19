@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { RotateCcw, X } from 'lucide-react';
+import { RotateCcw, X, AlertTriangle } from 'lucide-react';
 import { useStore } from '../store/useStore.js';
 import { triggerLightImpact } from '../utils/haptics.js';
 
@@ -71,8 +71,19 @@ const UndoItem = ({ id, action }) => {
 export const UndoSnackbar = () => {
   const pendingActions = useStore(state => state.pendingActions);
   const actionsEntries = Object.entries(pendingActions || {});
+  const [persistError, setPersistError] = useState(false);
 
-  if (actionsEntries.length === 0) return null;
+  // Listen for IDB persist errors (from optimistic UI rollback mechanism)
+  useEffect(() => {
+    const handler = () => {
+      setPersistError(true);
+      setTimeout(() => setPersistError(false), 4000);
+    };
+    window.addEventListener('focus-app:persist-error', handler);
+    return () => window.removeEventListener('focus-app:persist-error', handler);
+  }, []);
+
+  if (actionsEntries.length === 0 && !persistError) return null;
 
   return (
     <div
@@ -80,6 +91,23 @@ export const UndoSnackbar = () => {
       aria-live="polite"
       className="fixed bottom-24 left-4 right-4 z-[60] flex flex-col gap-2 pointer-events-none"
     >
+      {persistError && (
+        <div className="pointer-events-auto bg-red-950 border border-red-700 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.7)] overflow-hidden animate-in slide-in-from-bottom-3 fade-in duration-200">
+          <div className="flex items-center gap-3 px-4 py-3">
+            <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
+            <span className="text-xs font-bold text-red-300 flex-1">
+              Ошибка сохранения. Состояние восстановлено.
+            </span>
+            <button
+              onClick={() => setPersistError(false)}
+              className="p-1 text-red-500 hover:text-red-300 transition-colors flex-shrink-0"
+              aria-label="Закрыть"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
       {actionsEntries.map(([id, action]) => (
         <div key={id} className="pointer-events-auto">
           <UndoItem id={id} action={action} />

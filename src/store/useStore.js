@@ -4,6 +4,98 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import { generateId, calculatePoints, calculateNextDate } from '../utils/helpers.js';
 import { Preferences } from '@capacitor/preferences';
 import { getDescendantIds } from '../utils/graphUtils.js';
+import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval';
+
+// ---------------------------------------------------------------------------
+// Cycle-detection helper for bulk parentId updates.
+// Returns true if assigning `newParentId` to `taskId` would create a cycle.
+// ---------------------------------------------------------------------------
+const wouldCreateCycle = (taskId, newParentId, byId) => {
+  if (!newParentId) return false;
+  if (newParentId === taskId) return true;
+  // If newParentId is a descendant of taskId → cycle
+  const descendants = getDescendantIds(taskId, byId);
+  return descendants.includes(newParentId);
+};
+
+// ---------------------------------------------------------------------------
+// Deep-clone a task subtree with fresh IDs.
+// Iterative BFS — no recursion, no stack overflow on deep trees.
+//
+// @param {string}  rootId         — ID of the root task to clone
+// @param {Object}  byId           — current flat task dictionary
+// @param {string}  overrideDate   — if provided, set all cloned nodes to this date
+// @param {number}  deltaMs        — if non-zero, shift dates by this delta instead
+// @returns {{ clonedById: Object, newRootId: string }}
+// ---------------------------------------------------------------------------
+const cloneTaskSubtree = (rootId, byId, overrideDate, deltaMs = 0) => {
+  const clonedById = {};
+  const idMap = {}; // oldId → newId
+
+  // BFS to collect all nodes in the subtree
+  const queue = [rootId];
+  const visited = [];
+  while (queue.length > 0) {
+    const curId = queue.shift();
+    if (visited.includes(curId)) continue;
+    visited.push(curId);
+    idMap[curId] = generateId();
+    const task = byId[curId];
+    if (task?.childrenIds?.length) {
+      for (const cId of task.childrenIds) queue.push(cId);
+    }
+  }
+
+  // Build cloned nodes
+  for (const oldId of visited) {
+    const original = byId[oldId];
+    if (!original) continue;
+    const newId = idMap[oldId];
+
+    // Date shifting logic
+    let newDate = original.date;
+    let newDeadline = original.deadline;
+    if (overrideDate !== undefined && oldId === rootId) {
+      newDate = overrideDate;
+    } else if (deltaMs > 0) {
+      if (original.date) {
+        const d = new Date(original.date);
+        d.setTime(d.getTime() + deltaMs);
+        newDate = d.toISOString().split('T')[0];
+      }
+      if (original.deadline) {
+        const d = new Date(original.deadline);
+        d.setTime(d.getTime() + deltaMs);
+        newDeadline = d.toISOString().split('T')[0];
+      }
+    }
+
+    clonedById[newId] = {
+      ...original,
+      id: newId,
+      done: false,
+      completedAt: null,
+      isHidden: false,
+      date: newDate,
+      deadline: newDeadline,
+      parentId: original.parentId && idMap[original.parentId]
+        ? idMap[original.parentId]
+        : (oldId === rootId ? original.parentId : original.parentId), // root keeps original parentId
+      childrenIds: (original.childrenIds || []).map(cId => idMap[cId] || cId),
+    };
+  }
+
+  // Fix root's parentId — it stays as the original parent (not remapped)
+  const newRootId = idMap[rootId];
+  const originalRoot = byId[rootId];
+  if (clonedById[newRootId]) {
+    clonedById[newRootId].parentId = originalRoot.parentId ?? null;
+  }
+
+  return { clonedById, newRootId };
+};
+
+
 
 // ---------------------------------------------------------------------------
 // Secure key storage helpers (Keychain / Keystore via @capacitor/preferences)
@@ -33,14 +125,40 @@ const secureWrite = async (value) => {
   }
 };
 
-import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval';
+// ── Optimistic UI: last committed IDB snapshot for rollback ──────────────────
+let _lastPersistedSnapshot = null;
 
 const idbStorage = createJSONStorage(() => ({
   getItem: async (name) => {
     return (await idbGet(name)) || null;
   },
   setItem: async (name, value) => {
-    await idbSet(name, value);
+    // Snapshot the previous persisted value for rollback
+    const previousSnapshot = _lastPersistedSnapshot;
+    _lastPersistedSnapshot = value;
+    try {
+      await idbSet(name, value);
+    } catch (err) {
+      console.error('[focus-app] IDB persist failed — rolling back state', err);
+      // Rollback: restore previous state from snapshot
+      if (previousSnapshot) {
+        try {
+          const parsed = JSON.parse(previousSnapshot);
+          if (parsed?.state) {
+            // Restore core data slices only (avoid resetting UI/ephemeral)
+            useStore.setState({
+              byId: parsed.state.byId ?? {},
+              rootIds: parsed.state.rootIds ?? [],
+              activityLogs: parsed.state.activityLogs ?? [],
+            });
+          }
+        } catch (parseErr) {
+          console.error('[focus-app] Rollback parse failed', parseErr);
+        }
+      }
+      // Signal the UI via a custom event (UndoSnackbar listens via pendingActions)
+      window.dispatchEvent(new CustomEvent('focus-app:persist-error', { detail: { err } }));
+    }
   },
   removeItem: async (name) => {
     await idbDel(name);
@@ -313,29 +431,55 @@ export const useStore = create(
           return;
         }
 
-        // ── Repeating tasks: мгновенно переводим на следующую дату ─────
+        // ── Repeating tasks: создаём инстанс сегодняшнего дня, ─────────
+        // шаблон переводим на следующую дату.
         if (task.repeatType !== 'none') {
           const nextDate = calculateNextDate(task.date, task.repeatType, task.repeatDays, task.repeatMonthDay);
           const deltaMs = (task.date && nextDate)
             ? new Date(nextDate).getTime() - new Date(task.date).getTime()
             : 0;
           const newLog = { id: generateId(), type: 'completed', taskId: id, timestamp: Date.now(), points: calculatePoints(task.estimate) };
+
           set((s) => {
-            const newById = { ...s.byId, [id]: { ...task, done: false, date: nextDate, completedAt: null } };
+            // 1. Клонируем поддерево с новыми ID (инстанс текущего дня)
+            const { clonedById, newRootId } = cloneTaskSubtree(id, s.byId, task.date, 0);
+
+            // 2. Продвигаем шаблон на следующую дату (не трогаем его подзадачи)
+            const updatedTemplate = { ...task, done: false, date: nextDate, completedAt: null };
+            // Также продвигаем даты потомков шаблона
+            const newById = { ...s.byId, [id]: updatedTemplate, ...clonedById };
             if (deltaMs > 0) {
               getDescendantIds(id, s.byId).forEach(childId => {
                 const child = newById[childId];
                 if (child) {
-                  const cDate = child.date ? (() => { const d = new Date(child.date); d.setTime(d.getTime() + deltaMs); return d.toISOString().split('T')[0]; })() : child.date;
-                  const cDeadline = child.deadline ? (() => { const d = new Date(child.deadline); d.setTime(d.getTime() + deltaMs); return d.toISOString().split('T')[0]; })() : child.deadline;
+                  const cDate = child.date
+                    ? (() => { const d = new Date(child.date); d.setTime(d.getTime() + deltaMs); return d.toISOString().split('T')[0]; })()
+                    : child.date;
+                  const cDeadline = child.deadline
+                    ? (() => { const d = new Date(child.deadline); d.setTime(d.getTime() + deltaMs); return d.toISOString().split('T')[0]; })()
+                    : child.deadline;
                   newById[childId] = { ...child, done: false, date: cDate, deadline: cDeadline, completedAt: null };
                 }
               });
             }
-            return { byId: newById, activityLogs: [...s.activityLogs, newLog] };
+
+            // 3. Регистрируем новый инстанс в rootIds (если шаблон — корневой)
+            let newRootIds = [...s.rootIds];
+            if (!task.parentId) {
+              newRootIds.push(newRootId);
+            } else if (newById[task.parentId]) {
+              // Добавляем инстанс в childrenIds родителя
+              newById[task.parentId] = {
+                ...newById[task.parentId],
+                childrenIds: [...(newById[task.parentId].childrenIds || []), newRootId],
+              };
+            }
+
+            return { byId: newById, rootIds: newRootIds, activityLogs: [...s.activityLogs, newLog] };
           });
           return;
         }
+
 
         // ── Обычное завершение: soft-скрытие + undo-окно 3 сек ────────
         set((s) => ({
@@ -405,19 +549,62 @@ export const useStore = create(
 
       clearTaskSelection: () => set((state) => ({ ui: { ...state.ui, selectedTaskIds: [] } })),
 
-      updateMultipleTasks: (ids, payload) => set((state) => {
-        const newById = { ...state.byId };
-        const newLogs = [...state.activityLogs];
-        ids.forEach(id => {
-          const task = newById[id];
-          if (!task) return;
-          if (payload.date !== undefined && payload.date !== task.date) {
-            newLogs.push({ id: generateId(), type: 'rescheduled', taskId: id, timestamp: Date.now(), points: 0 });
+      updateMultipleTasks: (ids, payload) => {
+        const state = get();
+
+        // ── Cycle detection (must run before any mutation) ─────────────────
+        if (payload.parentId !== undefined) {
+          for (const id of ids) {
+            if (wouldCreateCycle(id, payload.parentId, state.byId)) {
+              // Reject the entire transaction — return a special signal
+              return { _lastBulkError: 'cycle' };
+            }
           }
-          newById[id] = { ...task, ...payload };
+        }
+
+        // ── Optimistic synchronous mutation ────────────────────────────────
+        set((s) => {
+          const newById = { ...s.byId };
+          let newRootIds = [...s.rootIds];
+          const newLogs = [...s.activityLogs];
+
+          for (const id of ids) {
+            const task = newById[id];
+            if (!task) continue;
+
+            // Log reschedules
+            if (payload.date !== undefined && payload.date !== task.date) {
+              newLogs.push({ id: generateId(), type: 'rescheduled', taskId: id, timestamp: Date.now(), points: 0 });
+            }
+
+            // Handle parentId graph edge rewiring
+            if (payload.parentId !== undefined && payload.parentId !== task.parentId) {
+              // Remove from old parent / rootIds
+              if (task.parentId && newById[task.parentId]) {
+                newById[task.parentId] = {
+                  ...newById[task.parentId],
+                  childrenIds: newById[task.parentId].childrenIds.filter(cId => cId !== id),
+                };
+              } else {
+                newRootIds = newRootIds.filter(rId => rId !== id);
+              }
+              // Add to new parent / rootIds
+              if (payload.parentId && newById[payload.parentId]) {
+                newById[payload.parentId] = {
+                  ...newById[payload.parentId],
+                  childrenIds: [...newById[payload.parentId].childrenIds, id],
+                };
+              } else {
+                newRootIds.push(id);
+              }
+            }
+
+            newById[id] = { ...task, ...payload };
+          }
+
+          return { byId: newById, rootIds: newRootIds, activityLogs: newLogs, ui: { ...s.ui, selectedTaskIds: [] } };
         });
-        return { byId: newById, activityLogs: newLogs, ui: { ...state.ui, selectedTaskIds: [] } };
-      }),
+      },
 
       updateUI: (payload) => set((state) => ({ ui: { ...state.ui, ...payload } })),
       toggleExpand: (id) => set((state) => {

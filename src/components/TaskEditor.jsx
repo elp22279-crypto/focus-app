@@ -69,7 +69,7 @@ export const TaskEditor = () => {
   const [draft, setDraft] = useState(() => {
     if (task) {
       if (!task.description) {
-        return { ...task, description: "**Зачем:**\n\n**Результат:**\n\n**Доп. инфо:**\n" };
+        return { ...task, description: "Зачем:\n\nРезультат:\n\nДоп. инфо:\n" };
       }
       return task;
     }
@@ -85,7 +85,7 @@ export const TaskEditor = () => {
   useEffect(() => {
     if (task) {
       if (!task.description) {
-        setDraft({ ...task, description: "**Зачем:**\n\n**Результат:**\n\n**Доп. инфо:**\n" });
+        setDraft({ ...task, description: "Зачем:\n\nРезультат:\n\nДоп. инфо:\n" });
       } else {
         setDraft(task);
       }
