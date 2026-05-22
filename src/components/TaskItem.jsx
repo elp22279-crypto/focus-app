@@ -282,6 +282,11 @@ export const TaskItem = memo(({ id, level = 0, forceExpanded = false, flatMode =
               <span className={`text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded border flex items-center shadow-inner ${prio.color} ${prio.bg} ${prio.border}`}>
                 {prio.label}
               </span>
+              {task.tags && task.tags.map(tag => (
+                <span key={tag} className="text-[9px] font-black text-amber-500 bg-amber-950/40 border border-amber-800 px-1.5 py-0.5 rounded flex items-center shadow-inner">
+                  {tag}
+                </span>
+              ))}
               {task.time && !task.done && (
                 <span className="text-[10px] font-black text-amber-500 bg-stone-900 border border-stone-700 px-1.5 py-0.5 rounded flex items-center shadow-inner">
                   {task.time}

@@ -1,4 +1,3 @@
-import { useStore } from '../store/useStore.js';
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { z } from 'zod';
 
@@ -27,12 +26,37 @@ export class MissingApiKeyError extends Error {
   }
 }
 
-export const generateSubtasksWithAI = async (parentTaskTitle) => {
-  const apiKey = useStore.getState().apiKey;
-
+export const generateSubtasksWithAI = async (parentTaskTitle, apiKey, signal) => {
   if (!apiKey) {
     throw new MissingApiKeyError();
   }
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.5-flash",
+    generationConfig: {
+      temperature: 0.1,
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: SchemaType.OBJECT,
+        properties: {
+          subtasks: {
+            type: SchemaType.ARRAY,
+            items: {
+              type: SchemaType.OBJECT,
+              properties: {
+                title: { type: SchemaType.STRING },
+                estimate: { type: SchemaType.NUMBER },
+                priority: { type: SchemaType.STRING, description: "Одно из: ui, in, un, nn" }
+              },
+              required: ["title", "estimate", "priority"]
+            }
+          }
+        },
+        required: ["subtasks"]
+      }
+    }
+  });
 
   const prompt = `
     Разбей задачу "${parentTaskTitle}" на 3-5 конкретных подзадач.
@@ -47,35 +71,10 @@ export const generateSubtasksWithAI = async (parentTaskTitle) => {
 
   let attempts = 0;
   while (attempts < 3) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     try {
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash",
-        generationConfig: {
-          temperature: 0.1,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: SchemaType.OBJECT,
-            properties: {
-              subtasks: {
-                type: SchemaType.ARRAY,
-                items: {
-                  type: SchemaType.OBJECT,
-                  properties: {
-                    title: { type: SchemaType.STRING },
-                    estimate: { type: SchemaType.NUMBER },
-                    priority: { type: SchemaType.STRING, description: "Одно из: ui, in, un, nn" }
-                  },
-                  required: ["title", "estimate", "priority"]
-                }
-              }
-            },
-            required: ["subtasks"]
-          }
-        }
-      });
 
-      const result = await model.generateContent(prompt);
+      const result = await model.generateContent(prompt, { requestOptions: { signal } });
       const content = result.response.text();
 
       if (!content) throw new Error('Empty AI response');
@@ -87,6 +86,7 @@ export const generateSubtasksWithAI = async (parentTaskTitle) => {
       }
       return validation.data.subtasks;
     } catch (error) {
+      if (error.name === 'AbortError' || error.message?.includes('aborted')) throw error;
       if (error instanceof MissingApiKeyError) throw error;
       
       attempts++;
@@ -99,34 +99,26 @@ export const generateSubtasksWithAI = async (parentTaskTitle) => {
   }
 };
 
-export const generateAnalyticsWithAI = async (periodDays) => {
-  const state = useStore.getState();
-  const apiKey = state.apiKey;
-
+export const generateAnalyticsWithAI = async (payload, periodDays, apiKey, signal) => {
   if (!apiKey) {
     throw new MissingApiKeyError();
   }
 
-  const cutoff = Date.now() - periodDays * 24 * 60 * 60 * 1000;
-  
-  // Aggregate rescheduling counts
-  const rescheduleCounts = {};
-  state.activityLogs.forEach(log => {
-    if (log.timestamp >= cutoff && log.type === 'rescheduled') {
-      rescheduleCounts[log.taskId] = (rescheduleCounts[log.taskId] || 0) + 1;
-    }
-  });
-
-  const payload = { completed: [], stuck: [] };
-  
-  Object.values(state.byId).forEach(task => {
-    // Check completed
-    if (task.done && task.completedAt >= cutoff) {
-      payload.completed.push({ title: task.title });
-    } 
-    // Check stuck (active and rescheduled)
-    else if (!task.done && task.status === 'active' && rescheduleCounts[task.id]) {
-      payload.stuck.push({ title: task.title, times: rescheduleCounts[task.id] });
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.5-flash",
+    generationConfig: {
+      temperature: 0.3,
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: SchemaType.OBJECT,
+        properties: {
+          success: { type: SchemaType.STRING, description: "Главный успех" },
+          bottleneck: { type: SchemaType.STRING, description: "Узкое горлышко" },
+          action: { type: SchemaType.STRING, description: "Директивное действие" }
+        },
+        required: ["success", "bottleneck", "action"]
+      }
     }
   });
 
@@ -144,26 +136,10 @@ ${JSON.stringify(payload)}
 
   let attempts = 0;
   while (attempts < 3) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     try {
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash",
-        generationConfig: {
-          temperature: 0.3,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: SchemaType.OBJECT,
-            properties: {
-              success: { type: SchemaType.STRING, description: "Главный успех" },
-              bottleneck: { type: SchemaType.STRING, description: "Узкое горлышко" },
-              action: { type: SchemaType.STRING, description: "Директивное действие" }
-            },
-            required: ["success", "bottleneck", "action"]
-          }
-        }
-      });
 
-      const result = await model.generateContent(prompt);
+      const result = await model.generateContent(prompt, { requestOptions: { signal } });
       const content = result.response.text();
 
       if (!content) throw new Error('Empty AI response');
@@ -175,6 +151,7 @@ ${JSON.stringify(payload)}
       }
       return validation.data;
     } catch (error) {
+      if (error.name === 'AbortError' || error.message?.includes('aborted')) throw error;
       if (error instanceof MissingApiKeyError) throw error;
       
       attempts++;

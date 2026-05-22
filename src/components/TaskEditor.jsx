@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   X, ArrowLeft, BarChart3, Repeat, Plus, Edit2, Trash2, Bot,
-  CalendarDays, Target, FolderOpen, Clock, ChevronRight, Search, Copy
+  CalendarDays, Target, FolderOpen, Clock, ChevronRight, Search, Copy, Hash
 } from 'lucide-react';
 import { useStore } from '../store/useStore.js';
 import { useNodeProgress } from '../store/selectors.js';
@@ -62,7 +62,20 @@ export const TaskEditor = () => {
   const updateUI    = useStore(state => state.updateUI);
   const deleteTask  = useStore(state => state.deleteTask);
   const addTask     = useStore(state => state.addTask);
+  const addTasksBatch = useStore(state => state.addTasksBatch);
   const categories  = useStore(state => state.categories);
+  const tags        = useStore(state => state.tags || []);
+  const graphVersion = useStore(state => state.graphVersion);
+  
+  const abortControllerRef = React.useRef(null);
+  
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
 
   const prog = useNodeProgress(editingNodeId);
 
@@ -78,6 +91,7 @@ export const TaskEditor = () => {
   const [newSubTitle, setNewSubTitle] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [isParentModalOpen, setIsParentModalOpen] = useState(false);
+  const [isTagsModalOpen, setIsTagsModalOpen] = useState(false);
   const [parentSearchQuery, setParentSearchQuery] = useState('');
   // 'none' | 'date' | 'priority' | 'project'
   const [activeMenu, setActiveMenu] = useState('none');
@@ -91,7 +105,7 @@ export const TaskEditor = () => {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task?.id]);
+  }, [editingNodeId]);
 
   // Сбрасываем меню при смене задачи
   useEffect(() => { setActiveMenu('none'); }, [task?.id]);
@@ -125,23 +139,29 @@ export const TaskEditor = () => {
     if (!draft.title?.trim() || isAiLoading) return;
     triggerLightImpact();
     setIsAiLoading(true);
+    
+    abortControllerRef.current = new AbortController();
+    
     try {
-      const { childrenIds, ...payload } = draft;
-      updateTask(task.id, payload);
-      const generatedTasks = await generateSubtasksWithAI(draft.title);
+      const apiKey = useStore.getState().apiKey;
+      const generatedTasks = await generateSubtasksWithAI(draft.title, apiKey, abortControllerRef.current.signal);
+      
       if (generatedTasks?.length > 0) {
         triggerSuccess();
-        generatedTasks.forEach(st => addTask({
+        const tasksPayload = generatedTasks.map(st => ({
           title: st.title, estimate: st.estimate || 0, priority: st.priority || 'nn',
-          parentId: task.id, status: draft.status || task.status,
-          date: draft.date || task.date, skipEdit: true
+          status: draft.status || task.status,
+          date: draft.date || task.date
         }));
+        addTasksBatch(tasksPayload, task.id);
       } else { 
         triggerWarning(); 
         await Toast.show({ text: 'Не удалось сгенерировать подзадачи. Повторите попытку.', duration: 'long' }); 
       }
     } catch (err) {
-      if (err instanceof MissingApiKeyError) {
+      if (err.name === 'AbortError' || err.message?.includes('aborted')) {
+        // Тихо игнорируем, допуская выполнение блока finally
+      } else if (err instanceof MissingApiKeyError) {
         triggerWarning(); saveCurrentTask(); updateUI({ editingNodeId: null, showSettings: true });
       } else { 
         triggerWarning(); 
@@ -150,13 +170,16 @@ export const TaskEditor = () => {
     } finally { setIsAiLoading(false); }
   };
 
-  const descendants  = getDescendants(task.id, useStore.getState().byId);
-  const validParents = Object.values(useStore.getState().byId)
-    .filter(n => n.id !== task.id && !descendants.includes(n.id));
-
-  const filteredParents = parentSearchQuery.trim()
-    ? validParents.filter(p => p.title.toLowerCase().includes(parentSearchQuery.toLowerCase()))
-    : validParents;
+  const filteredParents = React.useMemo(() => {
+    if (!isParentModalOpen) return [];
+    const state = useStore.getState();
+    const descendants = getDescendants(task.id, state.byId);
+    const valid = Object.values(state.byId).filter(n => n.id !== task.id && !descendants.includes(n.id));
+    if (parentSearchQuery.trim()) {
+      return valid.filter(p => p.title.toLowerCase().includes(parentSearchQuery.toLowerCase()));
+    }
+    return valid;
+  }, [task.id, parentSearchQuery, isParentModalOpen, graphVersion]);
 
   const totalMins = Math.round((draft.estimate || 0) * 60);
   const estHours  = Math.floor(totalMins / 60);
@@ -200,8 +223,9 @@ export const TaskEditor = () => {
         <div className="flex items-center gap-1 flex-shrink-0">
           <input
             type="date"
-            className="bg-stone-900 border border-stone-700 rounded-xl px-2 py-1.5 text-[10px] font-bold text-stone-300 outline-none focus:border-amber-700"
+            className="bg-stone-900 border border-stone-700 rounded-xl px-2 py-1.5 text-[10px] font-bold text-stone-300 outline-none focus:border-amber-700 cursor-pointer"
             value={draft.date || ''}
+            onClick={e => e.target.showPicker && e.target.showPicker()}
             onChange={e => { setDraft({ ...draft, date: e.target.value, status: e.target.value ? 'active' : 'backlog' }); }}
           />
         </div>
@@ -210,8 +234,9 @@ export const TaskEditor = () => {
           <span className="text-[9px] text-red-500 font-black whitespace-nowrap">Дедлайн:</span>
           <input
             type="date"
-            className="bg-stone-900 border border-red-900 rounded-xl px-2 py-1.5 text-[10px] font-bold text-red-400 outline-none focus:border-red-600"
+            className="bg-stone-900 border border-red-900 rounded-xl px-2 py-1.5 text-[10px] font-bold text-red-400 outline-none focus:border-red-600 cursor-pointer"
             value={draft.deadline || ''}
+            onClick={e => e.target.showPicker && e.target.showPicker()}
             onChange={e => setDraft({ ...draft, deadline: e.target.value })}
           />
         </div>
@@ -220,8 +245,9 @@ export const TaskEditor = () => {
           <Clock className="w-3 h-3 text-stone-500 flex-shrink-0" />
           <input
             type="time"
-            className="bg-stone-900 border border-stone-700 rounded-xl px-2 py-1.5 text-[10px] font-bold text-amber-400 outline-none focus:border-amber-700"
+            className="bg-stone-900 border border-stone-700 rounded-xl px-2 py-1.5 text-[10px] font-bold text-amber-400 outline-none focus:border-amber-700 cursor-pointer"
             value={draft.time || ''}
+            onClick={e => e.target.showPicker && e.target.showPicker()}
             onChange={e => setDraft({ ...draft, time: e.target.value })}
           />
         </div>
@@ -260,6 +286,18 @@ export const TaskEditor = () => {
         >
           {draft.parentId ? useStore.getState().byId[draft.parentId]?.title : '— Без родителя'}
         </button>
+        {/* Теги */}
+        <div className="flex items-center gap-1 flex-shrink-0 border-l border-stone-700 pl-2">
+          <Hash className="w-3 h-3 text-stone-500 flex-shrink-0" />
+          <button
+            onClick={() => { triggerLightImpact(); setIsTagsModalOpen(true); }}
+            className={`px-3 py-1.5 rounded-xl border text-[10px] font-bold ${
+              draft.tags?.length ? 'bg-amber-900/50 border-amber-700 text-amber-300' : 'bg-stone-900 border-stone-700 text-stone-400 hover:border-stone-600'
+            }`}
+          >
+            {draft.tags?.length ? `Теги: ${draft.tags.length}` : 'Без тегов'}
+          </button>
+        </div>
         {/* Категория */}
         <div className="flex items-center gap-1 flex-shrink-0 border-l border-stone-700 pl-2">
           <span className="text-[9px] text-stone-500 font-black whitespace-nowrap">Кат.:</span>
@@ -358,9 +396,9 @@ export const TaskEditor = () => {
     </div>
   );
 
-  // ── JSX ──────────────────────────────────────────────────────────────────
   return (
-    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-end justify-center">
+    <>
+      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-end justify-center">
       <div className="bg-stone-900 w-full max-w-md rounded-t-[2.5rem] shadow-[0_-10px_40px_rgba(0,0,0,0.8)] border-t border-x border-stone-700 animate-in slide-in-from-bottom duration-300 relative before:content-[''] before:absolute before:inset-0 before:bg-gradient-to-b before:from-white/5 before:to-transparent before:pointer-events-none before:rounded-t-[2.5rem] flex flex-col max-h-[88vh]">
 
         {/* ── Шапка ─────────────────────────────────────────────────────── */}
@@ -578,5 +616,56 @@ export const TaskEditor = () => {
         </div>
       )}
     </div>
+
+      {/* ── Модалка выбора тегов (полноэкранная) ────────────────────────── */}
+      {isTagsModalOpen && (
+        <div className="fixed inset-0 z-[60] bg-stone-950 flex flex-col animate-in slide-in-from-bottom duration-200">
+          <div className="flex items-center gap-3 p-4 border-b border-stone-800 bg-stone-900 flex-shrink-0">
+            <button
+              onClick={() => { triggerLightImpact(); setIsTagsModalOpen(false); }}
+              className="p-2 bg-stone-800 rounded-full hover:bg-stone-700 text-stone-400"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <h2 className="text-sm font-black text-amber-500 uppercase tracking-widest flex-1">Теги задачи</h2>
+            <span className="text-[10px] font-black text-amber-400 bg-amber-950/50 border border-amber-800 rounded-lg px-2 py-1">
+              {draft.tags?.length || 0}
+            </span>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto p-4 space-y-2 pb-10">
+            {tags.map(tag => {
+              const isSelected = draft.tags?.includes(tag);
+              return (
+                <button
+                  key={tag}
+                  onClick={() => {
+                    triggerLightImpact();
+                    const currentTags = draft.tags || [];
+                    if (isSelected) {
+                      setDraft({ ...draft, tags: currentTags.filter(t => t !== tag) });
+                    } else {
+                      setDraft({ ...draft, tags: [...currentTags, tag] });
+                    }
+                  }}
+                  className={`w-full text-left p-3 rounded-xl border flex items-center justify-between transition-all ${
+                    isSelected ? 'bg-amber-900/30 border-amber-800 text-amber-300' : 'bg-stone-900 border-stone-800 text-stone-300 hover:bg-stone-800/80'
+                  }`}
+                >
+                  <div className="text-sm font-bold truncate">{tag}</div>
+                  {isSelected && <Target className="w-4 h-4 text-amber-500" />}
+                </button>
+              );
+            })}
+            
+            {tags.length === 0 && (
+              <div className="text-center py-8 text-stone-500 text-sm">
+                Нет доступных тегов. Добавьте их в Базе Данных.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
   );
 };

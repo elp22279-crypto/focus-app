@@ -22,6 +22,8 @@ const UndoItem = ({ id, action }) => {
     return () => clearInterval(raf);
   }, [action.startedAt]);
 
+
+
   const label = action.type === 'delete'
     ? `Удалено: «${action.taskSnapshot.title || 'задача'}»`
     : `Выполнено: «${action.taskSnapshot.title || 'задача'}»`;

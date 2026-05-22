@@ -18,6 +18,12 @@ export const SettingsModal = () => {
   const addCategory     = useStore(state => state.addCategory);
   const deleteCategory  = useStore(state => state.deleteCategory);
   const updateCategory  = useStore(state => state.updateCategory);
+  
+  const tags            = useStore(state => state.tags || []);
+  const addTag          = useStore(state => state.addTag);
+  const deleteTag       = useStore(state => state.deleteTag);
+  const updateTag       = useStore(state => state.updateTag);
+  
   const apiKey          = useStore(state => state.apiKey);
   const setApiKey       = useStore(state => state.setApiKey);
   const restoreBackup   = useStore(state => state.restoreBackup);
@@ -25,6 +31,10 @@ export const SettingsModal = () => {
   const [newCatName, setNewCatName] = useState('');
   const [editCat, setEditCat]       = useState(null);
   const [editCatName, setEditCatName] = useState('');
+
+  const [newTagName, setNewTagName] = useState('');
+  const [editTag, setEditTag]       = useState(null);
+  const [editTagName, setEditTagName] = useState('');
 
   // API-ключ
   const [keyInput, setKeyInput] = useState('');
@@ -46,6 +56,19 @@ export const SettingsModal = () => {
   const handleAddCat = () => {
     const trimmed = newCatName.trim();
     if (trimmed && !categories.includes(trimmed)) { addCategory(trimmed); setNewCatName(''); }
+  };
+
+  // ── Tag handlers ─────────────────────────────────────────────────────────
+  const handleSaveTag = (oldName) => {
+    let trimmed = editTagName.trim();
+    if (trimmed && !trimmed.startsWith('#')) trimmed = '#' + trimmed;
+    if (trimmed && trimmed !== oldName && !tags.includes(trimmed)) updateTag(oldName, trimmed);
+    setEditTag(null);
+  };
+  const handleAddTag = () => {
+    let trimmed = newTagName.trim();
+    if (trimmed && !trimmed.startsWith('#')) trimmed = '#' + trimmed;
+    if (trimmed && !tags.includes(trimmed)) { addTag(trimmed); setNewTagName(''); }
   };
 
   // ── API key handlers ─────────────────────────────────────────────────────
@@ -328,6 +351,37 @@ export const SettingsModal = () => {
               <div className="flex gap-2">
                 <input className="bg-stone-950 border border-stone-800 rounded-lg px-3 py-2 text-xs flex-1 font-bold outline-none text-stone-200 placeholder-stone-600 focus:border-amber-900 transition-colors shadow-inner" placeholder="Новая категория..." value={newCatName} onChange={e => setNewCatName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAddCat()} />
                 <button onClick={handleAddCat} disabled={!newCatName.trim()} className="bg-stone-800 border border-stone-600 text-amber-500 px-3 rounded-lg hover:bg-stone-700 disabled:opacity-50 transition-all"><Plus className="w-4 h-4" /></button>
+              </div>
+            </div>
+
+            <div className="bg-stone-900 p-4 rounded-xl border border-stone-700 shadow-inner">
+              <label className="text-[9px] font-black text-amber-500 uppercase tracking-widest flex items-center gap-1 mb-3"><Hash className="w-3 h-3" /> Теги задач</label>
+              <div className="space-y-2 mb-4 max-h-40 overflow-y-auto custom-scrollbar pr-1">
+                {tags.map(tag => (
+                  <div key={tag} className="flex justify-between items-center bg-stone-950 p-2 rounded-lg border border-stone-800">
+                    {editTag === tag
+                      ? <input autoFocus className="bg-stone-900 border border-stone-700 rounded px-2 py-1 text-xs font-bold text-stone-200 outline-none w-full mr-2 shadow-inner" value={editTagName} onChange={e => setEditTagName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') handleSaveTag(tag); if (e.key === 'Escape') setEditTag(null); }} />
+                      : <span className="text-xs font-bold text-stone-300 truncate pr-2 flex-1">{tag}</span>
+                    }
+                    <div className="flex gap-1 flex-shrink-0">
+                      {editTag === tag ? (
+                        <>
+                          <button onClick={() => handleSaveTag(tag)} className="p-1.5 bg-emerald-950/50 border border-emerald-900 rounded"><CheckCircle2 className="w-3 h-3 text-emerald-500" /></button>
+                          <button onClick={() => setEditTag(null)} className="p-1.5 bg-stone-800 border border-stone-700 rounded"><X className="w-3 h-3 text-stone-400" /></button>
+                        </>
+                      ) : (
+                        <>
+                          <button onClick={() => { setEditTag(tag); setEditTagName(tag); }} className="p-1.5 bg-stone-800 border border-stone-700 rounded"><Edit2 className="w-3 h-3 text-stone-400" /></button>
+                          <button onClick={() => deleteTag(tag)} className="p-1.5 bg-red-950/30 border border-red-900 rounded"><Trash2 className="w-3 h-3 text-red-500" /></button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <input className="bg-stone-950 border border-stone-800 rounded-lg px-3 py-2 text-xs flex-1 font-bold outline-none text-stone-200 placeholder-stone-600 focus:border-amber-900 transition-colors shadow-inner" placeholder="Новый тег (напр. #дома)..." value={newTagName} onChange={e => setNewTagName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAddTag()} />
+                <button onClick={handleAddTag} disabled={!newTagName.trim()} className="bg-stone-800 border border-stone-600 text-amber-500 px-3 rounded-lg hover:bg-stone-700 disabled:opacity-50 transition-all"><Plus className="w-4 h-4" /></button>
               </div>
             </div>
 

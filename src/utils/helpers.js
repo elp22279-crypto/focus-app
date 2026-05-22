@@ -36,17 +36,25 @@ export const calculateNextDate = (taskDateStr, repeatType, repeatDays, repeatMon
   if (repeatType === 'daily') {
     d.setDate(d.getDate() + 1);
   } 
-  else if (repeatType === 'weekly' && repeatDays?.length > 0) {
-    let currentDay = d.getDay() === 0 ? 7 : d.getDay();
-    let sortedDays = [...repeatDays].sort((a, b) => a - b);
-    let nextDay = sortedDays.find(day => day > currentDay);
-    let daysToAdd = nextDay ? (nextDay - currentDay) : ((7 - currentDay) + sortedDays[0]);
-    d.setDate(d.getDate() + daysToAdd);
+  else if (repeatType === 'weekly') {
+    if (repeatDays?.length > 0) {
+      let currentDay = d.getDay() === 0 ? 7 : d.getDay();
+      let sortedDays = [...repeatDays].sort((a, b) => a - b);
+      let nextDay = sortedDays.find(day => day > currentDay);
+      let daysToAdd = nextDay ? (nextDay - currentDay) : ((7 - currentDay) + sortedDays[0]);
+      d.setDate(d.getDate() + daysToAdd);
+    } else {
+      d.setDate(d.getDate() + 7);
+    }
   } 
-  else if (repeatType === 'monthly' && repeatMonthDay) {
-    d.setMonth(d.getMonth() + 1);
-    let maxDays = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-    d.setDate(Math.min(repeatMonthDay, maxDays));
+  else if (repeatType === 'monthly') {
+    if (repeatMonthDay) {
+      d.setMonth(d.getMonth() + 1);
+      let maxDays = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+      d.setDate(Math.min(repeatMonthDay, maxDays));
+    } else {
+      d.setMonth(d.getMonth() + 1);
+    }
   }
 
   return d.toISOString().split('T')[0];

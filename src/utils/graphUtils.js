@@ -135,3 +135,129 @@ export const getTaskPath = (taskId, byId) => {
   }
   return path;
 };
+
+/**
+ * Pure function: Insert a new node into the graph.
+ * @returns {{ newById: Object, newRootIds: string[] }}
+ */
+export const insertNode = (byId, rootIds, task) => {
+  const newById = { ...byId, [task.id]: task };
+  let newRootIds = [...rootIds];
+
+  if (task.parentId && newById[task.parentId]) {
+    newById[task.parentId] = {
+      ...newById[task.parentId],
+      childrenIds: [...(newById[task.parentId].childrenIds || []), task.id]
+    };
+  } else {
+    newRootIds = [...newRootIds, task.id];
+  }
+
+  return { newById, newRootIds };
+};
+
+/**
+ * Pure function: Remove a node from the graph.
+ * @returns {{ newById: Object, newRootIds: string[] }}
+ */
+export const removeNode = (byId, rootIds, taskId) => {
+  const task = byId[taskId];
+  if (!task) return { newById: byId, newRootIds: rootIds };
+
+  const idsToDelete = [taskId, ...getDescendantIds(taskId, byId)];
+  const newById = { ...byId };
+  
+  idsToDelete.forEach(id => delete newById[id]);
+  
+  const newRootIds = rootIds.filter(rId => !idsToDelete.includes(rId));
+  
+  if (task.parentId && newById[task.parentId]) {
+    newById[task.parentId] = {
+      ...newById[task.parentId],
+      childrenIds: (newById[task.parentId].childrenIds || []).filter(cId => cId !== taskId)
+    };
+  }
+  
+  return { newById, newRootIds };
+};
+
+/**
+ * Pure function: Move a node to a new parent in the graph.
+ * @returns {{ newById: Object, newRootIds: string[] }}
+ */
+export const moveNode = (byId, rootIds, taskId, newParentId) => {
+  const task = byId[taskId];
+  if (!task || task.parentId === newParentId) return { newById: byId, newRootIds: rootIds };
+
+  const newById = { ...byId };
+  let newRootIds = [...rootIds];
+
+  // Remove from old parent
+  if (task.parentId && newById[task.parentId]) {
+    newById[task.parentId] = {
+      ...newById[task.parentId],
+      childrenIds: (newById[task.parentId].childrenIds || []).filter(cId => cId !== taskId)
+    };
+  } else {
+    newRootIds = newRootIds.filter(rId => rId !== taskId);
+  }
+
+  // Add to new parent
+  if (newParentId && newById[newParentId]) {
+    newById[newParentId] = {
+      ...newById[newParentId],
+      childrenIds: [...(newById[newParentId].childrenIds || []), taskId]
+    };
+  } else {
+    newRootIds = [...newRootIds, taskId];
+  }
+  
+  newById[taskId] = { ...task, parentId: newParentId };
+
+  return { newById, newRootIds };
+};
+
+/**
+ * Pure function: Clone a subgraph (deep copy) with newly generated IDs.
+ * @returns {{ newById: Object, newRootIds: string[], newRootCloneId: string }}
+ */
+export const cloneSubgraph = (byId, targetId, generateId) => {
+  const task = byId[targetId];
+  if (!task) return { clonedById: {}, newRootId: null, idMapping: {} };
+
+  const descendants = getDescendantIds(targetId, byId);
+  const allIds = [targetId, ...descendants];
+  
+  const idMapping = {};
+  allIds.forEach(id => idMapping[id] = generateId());
+  
+  const newRootId = idMapping[targetId];
+  const clonedById = {};
+  
+  allIds.forEach(oldId => {
+    const original = byId[oldId];
+    const newId = idMapping[oldId];
+    
+    const clonedTask = {
+      ...original,
+      id: newId,
+      done: false,
+      completedAt: null,
+      isHidden: false,
+      createdAt: Date.now()
+    };
+    
+    if (oldId === targetId) {
+      clonedTask.parentId = original.parentId;
+    } else {
+      clonedTask.parentId = original.parentId && idMapping[original.parentId] ? idMapping[original.parentId] : original.parentId;
+    }
+    
+    clonedTask.childrenIds = (original.childrenIds || []).map(cId => idMapping[cId] || cId);
+    
+    clonedById[newId] = clonedTask;
+  });
+  
+  return { clonedById, newRootId, idMapping };
+};
+

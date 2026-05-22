@@ -142,6 +142,7 @@ export const AppHeader = memo(({ today }) => {
                   <option value="none">Порядок</option>
                   <option value="time">Время</option>
                   <option value="priority">Приоритет</option>
+                  <option value="tags">Теги</option>
                 </select>
               )}
               <button

@@ -3,8 +3,11 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { generateId, calculatePoints, calculateNextDate } from '../utils/helpers.js';
 import { Preferences } from '@capacitor/preferences';
-import { getDescendantIds } from '../utils/graphUtils.js';
+import { getDescendantIds, insertNode, removeNode, moveNode, cloneSubgraph } from '../utils/graphUtils.js';
 import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval';
+
+// ---------------------------------------------------------------------------
+const actionTimers = new Map();
 
 // ---------------------------------------------------------------------------
 // Cycle-detection helper for bulk parentId updates.
@@ -18,82 +21,7 @@ const wouldCreateCycle = (taskId, newParentId, byId) => {
   return descendants.includes(newParentId);
 };
 
-// ---------------------------------------------------------------------------
-// Deep-clone a task subtree with fresh IDs.
-// Iterative BFS — no recursion, no stack overflow on deep trees.
-//
-// @param {string}  rootId         — ID of the root task to clone
-// @param {Object}  byId           — current flat task dictionary
-// @param {string}  overrideDate   — if provided, set all cloned nodes to this date
-// @param {number}  deltaMs        — if non-zero, shift dates by this delta instead
-// @returns {{ clonedById: Object, newRootId: string }}
-// ---------------------------------------------------------------------------
-const cloneTaskSubtree = (rootId, byId, overrideDate, deltaMs = 0) => {
-  const clonedById = {};
-  const idMap = {}; // oldId → newId
 
-  // BFS to collect all nodes in the subtree
-  const queue = [rootId];
-  const visited = [];
-  while (queue.length > 0) {
-    const curId = queue.shift();
-    if (visited.includes(curId)) continue;
-    visited.push(curId);
-    idMap[curId] = generateId();
-    const task = byId[curId];
-    if (task?.childrenIds?.length) {
-      for (const cId of task.childrenIds) queue.push(cId);
-    }
-  }
-
-  // Build cloned nodes
-  for (const oldId of visited) {
-    const original = byId[oldId];
-    if (!original) continue;
-    const newId = idMap[oldId];
-
-    // Date shifting logic
-    let newDate = original.date;
-    let newDeadline = original.deadline;
-    if (overrideDate !== undefined && oldId === rootId) {
-      newDate = overrideDate;
-    } else if (deltaMs > 0) {
-      if (original.date) {
-        const d = new Date(original.date);
-        d.setTime(d.getTime() + deltaMs);
-        newDate = d.toISOString().split('T')[0];
-      }
-      if (original.deadline) {
-        const d = new Date(original.deadline);
-        d.setTime(d.getTime() + deltaMs);
-        newDeadline = d.toISOString().split('T')[0];
-      }
-    }
-
-    clonedById[newId] = {
-      ...original,
-      id: newId,
-      done: false,
-      completedAt: null,
-      isHidden: false,
-      date: newDate,
-      deadline: newDeadline,
-      parentId: original.parentId && idMap[original.parentId]
-        ? idMap[original.parentId]
-        : (oldId === rootId ? original.parentId : original.parentId), // root keeps original parentId
-      childrenIds: (original.childrenIds || []).map(cId => idMap[cId] || cId),
-    };
-  }
-
-  // Fix root's parentId — it stays as the original parent (not remapped)
-  const newRootId = idMap[rootId];
-  const originalRoot = byId[rootId];
-  if (clonedById[newRootId]) {
-    clonedById[newRootId].parentId = originalRoot.parentId ?? null;
-  }
-
-  return { clonedById, newRootId };
-};
 
 
 
@@ -125,44 +53,10 @@ const secureWrite = async (value) => {
   }
 };
 
-// ── Optimistic UI: last committed IDB snapshot for rollback ──────────────────
-let _lastPersistedSnapshot = null;
-
 const idbStorage = createJSONStorage(() => ({
-  getItem: async (name) => {
-    return (await idbGet(name)) || null;
-  },
-  setItem: async (name, value) => {
-    // Snapshot the previous persisted value for rollback
-    const previousSnapshot = _lastPersistedSnapshot;
-    _lastPersistedSnapshot = value;
-    try {
-      await idbSet(name, value);
-    } catch (err) {
-      console.error('[focus-app] IDB persist failed — rolling back state', err);
-      // Rollback: restore previous state from snapshot
-      if (previousSnapshot) {
-        try {
-          const parsed = JSON.parse(previousSnapshot);
-          if (parsed?.state) {
-            // Restore core data slices only (avoid resetting UI/ephemeral)
-            useStore.setState({
-              byId: parsed.state.byId ?? {},
-              rootIds: parsed.state.rootIds ?? [],
-              activityLogs: parsed.state.activityLogs ?? [],
-            });
-          }
-        } catch (parseErr) {
-          console.error('[focus-app] Rollback parse failed', parseErr);
-        }
-      }
-      // Signal the UI via a custom event (UndoSnackbar listens via pendingActions)
-      window.dispatchEvent(new CustomEvent('focus-app:persist-error', { detail: { err } }));
-    }
-  },
-  removeItem: async (name) => {
-    await idbDel(name);
-  },
+  getItem: async (name) => (await idbGet(name)) || null,
+  setItem: async (name, value) => await idbSet(name, value),
+  removeItem: async (name) => await idbDel(name),
 }));
 
 
@@ -171,7 +65,9 @@ export const useStore = create(
     (set, get) => ({
       byId: {},
       rootIds: [],
+      graphVersion: 0,
       categories: ['Работа', 'Личное', 'Учеба', 'Здоровье'],
+      tags: ['#дома', '#выезд'],
       activityLogs: [],
       settings: { dailyLimit: 6, retentionMonths: 3, goals: { daily: 100, weekly: 500, monthly: 2000 } },
 
@@ -208,26 +104,41 @@ export const useStore = create(
       /** @private — зафиксировать отложенное действие немедленно */
       _commitPending: (id) => {
         const action = get().pendingActions[id];
-        if (!action) return;
-        clearTimeout(action.timeoutId);
+        
+        // Defensive cleanup
+        const cleanupTimer = () => {
+          if (actionTimers.has(id)) {
+            clearTimeout(actionTimers.get(id));
+            actionTimers.delete(id);
+          }
+        };
+
+        if (!action) {
+          cleanupTimer();
+          return;
+        }
+        
+        const state = get();
+        if (!state.byId[action.taskSnapshot.id]) {
+          cleanupTimer();
+          set(s => {
+            const newPending = { ...s.pendingActions };
+            delete newPending[id];
+            return { pendingActions: newPending };
+          });
+          return;
+        }
+
+        cleanupTimer();
 
         if (action.type === 'delete') {
           const { taskSnapshot } = action;
           set((state) => {
-            const idsToDelete = [taskSnapshot.id, ...getDescendantIds(taskSnapshot.id, state.byId)];
-            const newById = { ...state.byId };
-            idsToDelete.forEach(delId => delete newById[delId]);
-            const newRootIds = state.rootIds.filter(rId => !idsToDelete.includes(rId));
-            if (taskSnapshot.parentId && newById[taskSnapshot.parentId]) {
-              newById[taskSnapshot.parentId] = {
-                ...newById[taskSnapshot.parentId],
-                childrenIds: newById[taskSnapshot.parentId].childrenIds.filter(cId => cId !== taskSnapshot.id)
-              };
-            }
+            const { newById, newRootIds } = removeNode(state.byId, state.rootIds, taskSnapshot.id);
             const newLogs = [...state.activityLogs, { id: generateId(), type: 'deleted', taskId: taskSnapshot.id, timestamp: Date.now(), points: 0 }];
             const newPending = { ...state.pendingActions };
             delete newPending[id];
-            return { byId: newById, rootIds: newRootIds, activityLogs: newLogs, pendingActions: newPending };
+            return { byId: newById, rootIds: newRootIds, activityLogs: newLogs, pendingActions: newPending, graphVersion: state.graphVersion + 1 };
           });
         } else if (action.type === 'complete') {
           const { taskSnapshot } = action;
@@ -249,7 +160,12 @@ export const useStore = create(
       undoAction: (id) => {
         const action = get().pendingActions[id];
         if (!action) return;
-        clearTimeout(action.timeoutId);
+
+        if (actionTimers.has(id)) {
+          clearTimeout(actionTimers.get(id));
+          actionTimers.delete(id);
+        }
+        
         const { taskSnapshot } = action;
         set((state) => {
           const newById = { ...state.byId };
@@ -283,7 +199,8 @@ export const useStore = create(
         baseViewMode: 'active',
         baseFilterDate: '',
         baseFilterDeadline: '',
-        selectedTaskIds: []
+        selectedTaskIds: [],
+        isRecording: false
       },
 
       addTask: (payload) => set((state) => {
@@ -291,22 +208,51 @@ export const useStore = create(
         const newTask = {
           id, title: payload.title || '', estimate: payload.estimate || 0, done: false,
           description: payload.description || '', status: payload.status || 'active', date: payload.date || null, deadline: payload.deadline || null,
-          time: payload.time || null, category: payload.category || null, priority: payload.priority || 'nn',
+          time: payload.time || null, category: payload.category || null, tags: payload.tags || [], priority: payload.priority || 'nn',
           repeatType: payload.repeatType || 'none', repeatDays: payload.repeatDays || [],
           repeatMonthDay: payload.repeatMonthDay || null, completedAt: null, parentId: payload.parentId || null, childrenIds: []
         };
-        const newById = { ...state.byId, [id]: newTask };
-        const newRootIds = [...state.rootIds];
-
-        if (newTask.parentId && newById[newTask.parentId]) {
-          newById[newTask.parentId] = { ...newById[newTask.parentId], childrenIds: [...newById[newTask.parentId].childrenIds, id] };
-        } else { newRootIds.push(id); }
+        
+        const { newById, newRootIds } = insertNode(state.byId, state.rootIds, newTask);
 
         return { 
           byId: newById, 
           rootIds: newRootIds, 
+          graphVersion: state.graphVersion + 1,
           ui: payload.skipEdit ? state.ui : { ...state.ui, editingNodeId: id } 
         };
+      }),
+
+      addTasksBatch: (payloadArray, parentId) => set((state) => {
+        let newById = { ...state.byId };
+        let newRootIds = [...state.rootIds];
+        let newChildrenIds = [];
+        
+        payloadArray.forEach(payload => {
+          const id = generateId();
+          const newTask = {
+            id, title: payload.title || '', estimate: payload.estimate || 0, done: false,
+            description: payload.description || '', status: payload.status || 'active', date: payload.date || null, deadline: payload.deadline || null,
+            time: payload.time || null, category: payload.category || null, tags: payload.tags || [], priority: payload.priority || 'nn',
+            repeatType: payload.repeatType || 'none', repeatDays: payload.repeatDays || [],
+            repeatMonthDay: payload.repeatMonthDay || null, completedAt: null, parentId: parentId || null, childrenIds: []
+          };
+          newById[id] = newTask;
+          newChildrenIds = [...newChildrenIds, id];
+          
+          if (!parentId) {
+            newRootIds = [...newRootIds, id];
+          }
+        });
+
+        if (parentId && newById[parentId]) {
+          newById[parentId] = {
+            ...newById[parentId],
+            childrenIds: [...(newById[parentId].childrenIds || []), ...newChildrenIds]
+          };
+        }
+
+        return { byId: newById, rootIds: newRootIds, graphVersion: state.graphVersion + 1 };
       }),
 
       updateTask: (id, payload) => set((state) => {
@@ -316,20 +262,20 @@ export const useStore = create(
         if (payload.date !== undefined && payload.date !== task.date) {
           newLogs.push({ id: generateId(), type: 'rescheduled', taskId: id, timestamp: Date.now(), points: 0 });
         }
-        const newById = { ...state.byId };
-        let newRootIds = [...state.rootIds];
+        
+        let newById = state.byId;
+        let newRootIds = state.rootIds;
+        let versionDelta = 0;
 
         if (payload.parentId !== undefined && payload.parentId !== task.parentId) {
-          if (task.parentId && newById[task.parentId]) {
-            newById[task.parentId] = { ...newById[task.parentId], childrenIds: newById[task.parentId].childrenIds.filter(cId => cId !== id) };
-          } else { newRootIds = newRootIds.filter(rId => rId !== id); }
-
-          if (payload.parentId && newById[payload.parentId]) {
-            newById[payload.parentId] = { ...newById[payload.parentId], childrenIds: [...newById[payload.parentId].childrenIds, id] };
-          } else { newRootIds.push(id); }
+          const moveRes = moveNode(newById, newRootIds, id, payload.parentId);
+          newById = moveRes.newById;
+          newRootIds = moveRes.newRootIds;
+          versionDelta = 1;
         }
-        newById[id] = { ...task, ...payload };
-        return { byId: newById, rootIds: newRootIds, activityLogs: newLogs };
+
+        newById = { ...newById, [id]: { ...newById[id], ...payload } };
+        return { byId: newById, rootIds: newRootIds, activityLogs: newLogs, graphVersion: state.graphVersion + versionDelta };
       }),
 
       deleteTask: (id) => {
@@ -348,72 +294,40 @@ export const useStore = create(
           };
         });
 
-        // Запланировать реальное удаление через 3 сек
-        const timeoutId = setTimeout(() => get()._commitPending(id), 3000);
+        // Запланировать реальное удаление (таймер в UndoSnackbar)
         set(s => ({
           pendingActions: {
             ...s.pendingActions,
-            [id]: { type: 'delete', taskSnapshot: task, timeoutId, startedAt: Date.now() }
+            [id]: { type: 'delete', taskSnapshot: task, startedAt: Date.now() }
           }
         }));
+        
+        const timerId = setTimeout(() => {
+          get()._commitPending(id);
+        }, 3000);
+        actionTimers.set(id, timerId);
       },
 
       duplicateTask: (id) => set((state) => {
         const original = state.byId[id];
         if (!original) return state;
 
-        const newById = { ...state.byId };
-        let newRootIds = [...state.rootIds];
         const newLogs = [...state.activityLogs];
+        const { clonedById, newRootId } = cloneSubgraph(state.byId, id, generateId);
 
-        const descendants = getDescendantIds(id, state.byId);
-        const allOriginalIds = [id, ...descendants];
-
-        const idMap = {};
-        allOriginalIds.forEach(oldId => { idMap[oldId] = generateId(); });
-
-        const newRootCloneId = idMap[id];
-
-        allOriginalIds.forEach(oldId => {
-          const oldTask = state.byId[oldId];
-          const newId = idMap[oldId];
-          
-          const clonedTask = {
-            ...oldTask,
-            id: newId,
-            done: false,
-            isHidden: false,
-            completedAt: null,
-            createdAt: Date.now()
-          };
-
-          if (oldId === id) {
-            clonedTask.parentId = oldTask.parentId;
-          } else {
-            if (oldTask.parentId && idMap[oldTask.parentId]) {
-              clonedTask.parentId = idMap[oldTask.parentId];
-            }
-          }
-
-          if (oldTask.childrenIds && oldTask.childrenIds.length > 0) {
-            clonedTask.childrenIds = oldTask.childrenIds.map(cId => idMap[cId] || cId);
-          } else {
-            clonedTask.childrenIds = [];
-          }
-
-          newById[newId] = clonedTask;
-        });
-
+        let newById = { ...state.byId, ...clonedById };
+        let newRootIds = [...state.rootIds];
+        
         if (original.parentId && newById[original.parentId]) {
           newById[original.parentId] = {
             ...newById[original.parentId],
-            childrenIds: [...newById[original.parentId].childrenIds, newRootCloneId]
+            childrenIds: [...(newById[original.parentId].childrenIds || []), newRootId]
           };
         } else {
-          newRootIds.push(newRootCloneId);
+          newRootIds = [...newRootIds, newRootId];
         }
 
-        return { byId: newById, rootIds: newRootIds, activityLogs: newLogs };
+        return { byId: newById, rootIds: newRootIds, activityLogs: newLogs, graphVersion: state.graphVersion + 1 };
       }),
 
       toggleDone: (id) => {
@@ -442,14 +356,16 @@ export const useStore = create(
 
           set((s) => {
             // 1. Клонируем поддерево с новыми ID (инстанс текущего дня)
-            const { clonedById, newRootId } = cloneTaskSubtree(id, s.byId, task.date, 0);
+            const { clonedById, newRootId, idMapping } = cloneSubgraph(s.byId, id, generateId);
 
-            // 2. Продвигаем шаблон на следующую дату (не трогаем его подзадачи)
-            const updatedTemplate = { ...task, done: false, date: nextDate, completedAt: null };
-            // Также продвигаем даты потомков шаблона
-            const newById = { ...s.byId, [id]: updatedTemplate, ...clonedById };
+            // 2. Продвигаем шаблон на следующую дату
+            let newById = { ...s.byId, ...clonedById };
+            newById[id] = { ...newById[id], done: false, date: nextDate, completedAt: null };
+            
+            // Также продвигаем даты потомков шаблона (используя idMapping для O(1) доступа)
             if (deltaMs > 0) {
-              getDescendantIds(id, s.byId).forEach(childId => {
+              Object.keys(idMapping).forEach(childId => {
+                if (childId === id) return;
                 const child = newById[childId];
                 if (child) {
                   const cDate = child.date
@@ -463,19 +379,18 @@ export const useStore = create(
               });
             }
 
-            // 3. Регистрируем новый инстанс в rootIds (если шаблон — корневой)
+            // 3. Регистрируем новый инстанс (клон)
             let newRootIds = [...s.rootIds];
-            if (!task.parentId) {
-              newRootIds.push(newRootId);
-            } else if (newById[task.parentId]) {
-              // Добавляем инстанс в childrenIds родителя
+            if (task.parentId && newById[task.parentId]) {
               newById[task.parentId] = {
                 ...newById[task.parentId],
-                childrenIds: [...(newById[task.parentId].childrenIds || []), newRootId],
+                childrenIds: [...(newById[task.parentId].childrenIds || []), newRootId]
               };
+            } else {
+              newRootIds = [...newRootIds, newRootId];
             }
 
-            return { byId: newById, rootIds: newRootIds, activityLogs: [...s.activityLogs, newLog] };
+            return { byId: newById, rootIds: newRootIds, activityLogs: [...s.activityLogs, newLog], graphVersion: s.graphVersion + 1 };
           });
           return;
         }
@@ -486,13 +401,17 @@ export const useStore = create(
           byId: { ...s.byId, [id]: { ...task, done: true, completedAt: Date.now(), isHidden: true } }
         }));
 
-        const timeoutId = setTimeout(() => get()._commitPending(id), 3000);
         set(s => ({
           pendingActions: {
             ...s.pendingActions,
-            [id]: { type: 'complete', taskSnapshot: task, timeoutId, startedAt: Date.now() }
+            [id]: { type: 'complete', taskSnapshot: task, startedAt: Date.now() }
           }
         }));
+
+        const timerId = setTimeout(() => {
+          get()._commitPending(id);
+        }, 3000);
+        actionTimers.set(id, timerId);
       },
 
       handleRepeatNext: (id) => set((state) => {
@@ -523,7 +442,8 @@ export const useStore = create(
 
         return {
           byId: newById,
-          activityLogs: [...state.activityLogs, { id: generateId(), type: 'rescheduled', taskId: id, timestamp: Date.now(), points: 0 }]
+          activityLogs: [...state.activityLogs, { id: generateId(), type: 'rescheduled', taskId: id, timestamp: Date.now(), points: 0 }],
+          graphVersion: state.graphVersion + 1
         };
       }),
 
@@ -564,9 +484,10 @@ export const useStore = create(
 
         // ── Optimistic synchronous mutation ────────────────────────────────
         set((s) => {
-          const newById = { ...s.byId };
+          let newById = { ...s.byId };
           let newRootIds = [...s.rootIds];
           const newLogs = [...s.activityLogs];
+          let versionDelta = 0;
 
           for (const id of ids) {
             const task = newById[id];
@@ -579,30 +500,16 @@ export const useStore = create(
 
             // Handle parentId graph edge rewiring
             if (payload.parentId !== undefined && payload.parentId !== task.parentId) {
-              // Remove from old parent / rootIds
-              if (task.parentId && newById[task.parentId]) {
-                newById[task.parentId] = {
-                  ...newById[task.parentId],
-                  childrenIds: newById[task.parentId].childrenIds.filter(cId => cId !== id),
-                };
-              } else {
-                newRootIds = newRootIds.filter(rId => rId !== id);
-              }
-              // Add to new parent / rootIds
-              if (payload.parentId && newById[payload.parentId]) {
-                newById[payload.parentId] = {
-                  ...newById[payload.parentId],
-                  childrenIds: [...newById[payload.parentId].childrenIds, id],
-                };
-              } else {
-                newRootIds.push(id);
-              }
+              const moveRes = moveNode(newById, newRootIds, id, payload.parentId);
+              newById = moveRes.newById;
+              newRootIds = moveRes.newRootIds;
+              versionDelta = 1;
             }
 
-            newById[id] = { ...task, ...payload };
+            newById[id] = { ...newById[id], ...payload };
           }
 
-          return { byId: newById, rootIds: newRootIds, activityLogs: newLogs, ui: { ...s.ui, selectedTaskIds: [] } };
+          return { byId: newById, rootIds: newRootIds, activityLogs: newLogs, ui: { ...s.ui, selectedTaskIds: [] }, graphVersion: s.graphVersion + versionDelta };
         });
       },
 
@@ -624,6 +531,25 @@ export const useStore = create(
         Object.values(newById).forEach(t => { if (t.category === oldName) newById[t.id].category = newName; });
         return { categories: state.categories.map(c => c === oldName ? newName : c), byId: newById };
       }),
+      addTag: (name) => set((state) => ({ tags: [...(state.tags || []), name] })),
+      deleteTag: (name) => set((state) => {
+        const newById = { ...state.byId };
+        Object.values(newById).forEach(t => {
+          if (t.tags && t.tags.includes(name)) {
+            newById[t.id] = { ...t, tags: t.tags.filter(tag => tag !== name) };
+          }
+        });
+        return { tags: (state.tags || []).filter(t => t !== name), byId: newById };
+      }),
+      updateTag: (oldName, newName) => set((state) => {
+        const newById = { ...state.byId };
+        Object.values(newById).forEach(t => {
+          if (t.tags && t.tags.includes(oldName)) {
+            newById[t.id] = { ...t, tags: t.tags.map(tag => tag === oldName ? newName : tag) };
+          }
+        });
+        return { tags: (state.tags || []).map(t => t === oldName ? newName : t), byId: newById };
+      }),
 
       /**
        * Восстановить данные из резервной копии.
@@ -631,13 +557,13 @@ export const useStore = create(
        */
       restoreBackup: ({ byId, rootIds, activityLogs }) => {
         const { pendingActions } = get();
-        Object.values(pendingActions).forEach(action => clearTimeout(action.timeoutId));
 
         set((state) => ({
           byId,
           rootIds,
           activityLogs: activityLogs || [],
           pendingActions: {},
+          graphVersion: state.graphVersion + 1,
           ui: {
             ...state.ui,
             editingNodeId: null,
@@ -673,18 +599,25 @@ export const useStore = create(
         const { _hasHydrated, setHasHydrated, apiKey, loadApiKey, setApiKey, pendingActions, _commitPending, undoAction, ...rest } = state;
         return rest;
       },
+      // Декларативная миграция данных
+      version: 1,
+      migrate: (persistedState, version) => {
+        if (!persistedState || !persistedState.byId) return persistedState;
+
+        const { byId, ...rest } = persistedState;
+        
+        const cleanedById = Object.entries(byId).reduce((acc, [id, task]) => {
+          const { isHidden, ...taskData } = task; // eslint-disable-line no-unused-vars
+          acc[id] = { ...taskData, isHidden: false, tags: taskData.tags || [] };
+          return acc;
+        }, {});
+
+        return { ...rest, tags: rest.tags || ['#дома', '#выезд'], byId: cleanedById };
+      },
       merge: (persistedState, currentState) => {
-        // Снять isHidden со всех задач при гидрации (защита от краша)
-        const cleanById = {};
-        const srcById = persistedState.byId || {};
-        Object.keys(srcById).forEach(id => {
-          const { isHidden, ...task } = srcById[id]; // eslint-disable-line no-unused-vars
-          cleanById[id] = task;
-        });
         return {
           ...currentState,
           ...persistedState,
-          byId: cleanById,
           // apiKey и pendingActions никогда не берём из persistedState
           apiKey: null,
           pendingActions: {},
@@ -698,7 +631,8 @@ export const useStore = create(
             showSettings: false,
             showOverdue: false,
             expandedNodes: [],
-            selectedTaskIds: []
+            selectedTaskIds: [],
+            isRecording: false
           }
         };
       }

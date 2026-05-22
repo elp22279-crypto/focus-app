@@ -166,8 +166,9 @@ export const BottomActionBar = memo(() => {
             type="date"
             min={today}
             value={rescheduleDate}
+            onClick={e => e.target.showPicker && e.target.showPicker()}
             onChange={e => setRescheduleDate(e.target.value)}
-            className="flex-1 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-bold text-stone-200 outline-none focus:border-blue-600"
+            className="flex-1 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-sm font-bold text-stone-200 outline-none focus:border-blue-600 cursor-pointer"
           />
           <button
             onClick={handleReschedule}

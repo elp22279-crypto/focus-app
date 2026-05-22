@@ -63,6 +63,16 @@ export const AnalyticsView = memo(() => {
   const [aiPeriod, setAiPeriod] = useState(1);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [aiError, setAiError] = useState(null);
+  
+  const abortControllerRef = React.useRef(null);
+  
+  React.useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
 
   // Checks if the cache for the current period is from today
   const getCachedData = (period) => {
@@ -85,11 +95,34 @@ export const AnalyticsView = memo(() => {
     triggerLightImpact();
     setIsAiLoading(true);
     setAiError(null);
+    
+    abortControllerRef.current = new AbortController();
+
     try {
-      const responseData = await generateAnalyticsWithAI(aiPeriod);
+      const state = useStore.getState();
+      const cutoff = Date.now() - aiPeriod * 24 * 60 * 60 * 1000;
+      
+      const rescheduleCounts = {};
+      state.activityLogs.forEach(log => {
+        if (log.timestamp >= cutoff && log.type === 'rescheduled') {
+          rescheduleCounts[log.taskId] = (rescheduleCounts[log.taskId] || 0) + 1;
+        }
+      });
+
+      const payload = { completed: [], stuck: [] };
+      Object.values(state.byId).forEach(task => {
+        if (task.done && task.completedAt >= cutoff) {
+          payload.completed.push({ title: task.title });
+        } else if (!task.done && task.status === 'active' && rescheduleCounts[task.id]) {
+          payload.stuck.push({ title: task.title, times: rescheduleCounts[task.id] });
+        }
+      });
+
+      const responseData = await generateAnalyticsWithAI(payload, aiPeriod, apiKey, abortControllerRef.current.signal);
       setAiAnalyticsCache(aiPeriod, responseData);
       triggerSuccess();
     } catch (err) {
+      if (err.name === 'AbortError' || err.message?.includes('aborted')) return;
       triggerWarning();
       if (err instanceof MissingApiKeyError) {
         updateUI({ showSettings: true });

@@ -19,6 +19,11 @@ import { UndoSnackbar }    from './components/UndoSnackbar.jsx';
 import { TaskEditor }      from './components/TaskEditor.jsx';
 import { SettingsModal }   from './components/SettingsModal.jsx';
 
+import { Mic } from 'lucide-react';
+import { startVoiceCapture, stopVoiceCapture } from './utils/audioCapture.js';
+import { parseVoiceInput } from './utils/voiceParser.js';
+import { triggerLightImpact } from './utils/haptics.js';
+
 // ── Синхронизация уведомлений (не рендерит ничего) ───────────────────────────
 const NotificationSync = memo(() => {
   const byId = useStore(state => state.byId);
@@ -83,6 +88,62 @@ const AddTaskFab = memo(() => {
 });
 AddTaskFab.displayName = 'AddTaskFab';
 
+// ── FAB — кнопка голосового ввода ────────────────────────────────────────────
+const VoiceTaskFab = memo(() => {
+  const activeTab    = useStore(state => state.ui.activeTab);
+  const selectedDate = useStore(state => state.ui.selectedDate);
+  const isSelecting  = useStore(state => (state.ui.selectedTaskIds?.length ?? 0) > 0);
+  const isRecording  = useStore(state => state.ui.isRecording);
+  const updateUI     = useStore(state => state.updateUI);
+  const addTask      = useStore(state => state.addTask);
+
+  const handleVoiceInput = useCallback(async () => {
+    if (isRecording) {
+      triggerLightImpact();
+      await stopVoiceCapture();
+      updateUI({ isRecording: false });
+      return;
+    }
+    
+    triggerLightImpact();
+    updateUI({ isRecording: true });
+
+    const rawText = await startVoiceCapture();
+    
+    if (rawText) {
+      const parsedData = await parseVoiceInput(rawText);
+      if (parsedData) {
+        addTask({
+          ...parsedData,
+          status: activeTab === 'daily' ? 'active' : 'backlog',
+          date: parsedData.date || (activeTab === 'daily' ? selectedDate : null),
+          skipEdit: true // do not open editor automatically
+        });
+      }
+    }
+
+    await stopVoiceCapture();
+    updateUI({ isRecording: false });
+  }, [updateUI, addTask, activeTab, selectedDate]);
+
+  if (isSelecting) return null;
+
+  return (
+    <button
+      id="voice-task-fab"
+      onClick={handleVoiceInput}
+      className={`fixed bottom-44 right-6 w-14 h-14 rounded-full border-2 flex items-center justify-center transition-all z-40 ${
+        isRecording 
+          ? 'bg-red-900 border-red-500 text-red-200 animate-pulse shadow-[0_0_20px_rgba(239,68,68,0.6)]' 
+          : 'bg-stone-800 border-stone-600 text-stone-300 hover:bg-stone-700'
+      }`}
+    >
+      <Mic className="w-6 h-6" />
+    </button>
+  );
+});
+VoiceTaskFab.displayName = 'VoiceTaskFab';
+
 // ── Главный контейнер ────────────────────────────────────────────────────────
 const FocusApp = memo(() => {
   const activeTab    = useStore(state => state.ui.activeTab);
@@ -113,6 +174,7 @@ const FocusApp = memo(() => {
       {showSettings && <SettingsModal />}
 
       {/* ── Плавающие элементы ────────────────────────────────────────── */}
+      <VoiceTaskFab />
       <AddTaskFab />
       <AppNav />
     </div>

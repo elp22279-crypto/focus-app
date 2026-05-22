@@ -233,8 +233,9 @@ export const InlineSubtaskEditor = ({ parentTask, onSave, onCancel, prevInputRef
               <input
                 type="date"
                 value={date}
+                onClick={e => e.target.showPicker && e.target.showPicker()}
                 onChange={e => setDate(e.target.value)}
-                className="bg-transparent text-[10px] font-bold text-stone-300 outline-none w-[90px]"
+                className="bg-transparent text-[10px] font-bold text-stone-300 outline-none w-[90px] cursor-pointer"
               />
             </div>
 
@@ -243,8 +244,9 @@ export const InlineSubtaskEditor = ({ parentTask, onSave, onCancel, prevInputRef
               <input
                 type="time"
                 value={time}
+                onClick={e => e.target.showPicker && e.target.showPicker()}
                 onChange={e => setTime(e.target.value)}
-                className="bg-transparent text-[10px] font-bold text-amber-400 outline-none w-[60px]"
+                className="bg-transparent text-[10px] font-bold text-amber-400 outline-none w-[60px] cursor-pointer"
               />
             </div>
           </div>

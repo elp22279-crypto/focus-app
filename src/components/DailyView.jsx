@@ -1,6 +1,6 @@
 // src/components/DailyView.jsx
 import React, { memo } from 'react';
-import { Clock, Target } from 'lucide-react';
+import { Clock, Target, Hash } from 'lucide-react';
 import { useAutoAnimate } from '@formkit/auto-animate/react';
 import { useStore } from '../store/useStore.js';
 import { useDailyIds } from '../store/selectors.js';
@@ -11,6 +11,7 @@ export const DailyView = memo(() => {
   const dailyIds = useDailyIds();
   const sortMode = useStore(state => state.ui.sortMode);
   const byId = useStore(state => state.byId);
+  const tags = useStore(state => state.tags || []);
 
   // useAutoAnimate on the outermost list container
   const [listRef] = useAutoAnimate();
@@ -49,6 +50,37 @@ export const DailyView = memo(() => {
             </div>
           );
         })}
+      </div>
+    );
+  }
+
+  if (sortMode === 'tags') {
+    return (
+      <div ref={listRef}>
+        {tags.map(tag => {
+          const tIds = dailyIds.filter(id => byId[id]?.tags?.includes(tag));
+          if (!tIds.length) return null;
+          return (
+            <div key={tag} className="mb-6">
+              <h3 className="text-[10px] font-black uppercase tracking-widest px-2 mb-2 border-b border-stone-800 pb-1 flex items-center gap-1 text-amber-500">
+                <Hash className="w-3 h-3" /> {tag}
+              </h3>
+              {tIds.map(id => <TaskItem key={`${tag}-${id}`} id={id} />)}
+            </div>
+          );
+        })}
+        {(() => {
+          const noTagIds = dailyIds.filter(id => !byId[id]?.tags?.length);
+          if (!noTagIds.length) return null;
+          return (
+            <div key="no-tags" className="mb-6">
+              <h3 className="text-[10px] font-black uppercase tracking-widest px-2 mb-2 border-b border-stone-800 pb-1 flex items-center gap-1 text-stone-500">
+                <Hash className="w-3 h-3" /> Без тегов
+              </h3>
+              {noTagIds.map(id => <TaskItem key={`notag-${id}`} id={id} />)}
+            </div>
+          );
+        })()}
       </div>
     );
   }
