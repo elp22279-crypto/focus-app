@@ -5,12 +5,13 @@
  */
 import React, { memo, useCallback, useMemo } from 'react';
 import {
-  Settings, CalendarDays, ChevronLeft, ChevronRight, X
+  Settings, CalendarDays, ChevronLeft, ChevronRight, X, List, Kanban
 } from 'lucide-react';
 import { useStore }          from '../store/useStore.js';
 import { useShallow }        from 'zustand/react/shallow';
 import { useDailyLoad }      from '../store/selectors.js';
 import { formatHeaderDate }  from '../utils/helpers.js';
+import { triggerLightImpact } from '../utils/haptics.js';
 
 // ── Контекстный хедер (режим мультивыбора) ──────────────────────────────────
 const ContextualHeader = memo(({ count, onClear }) => (
@@ -73,6 +74,7 @@ export const AppHeader = memo(({ today }) => {
   const activeTab        = useStore(state => state.ui.activeTab);
   const selectedDate     = useStore(state => state.ui.selectedDate);
   const sortMode         = useStore(state => state.ui.sortMode);
+  const viewMode         = useStore(state => state.ui.viewMode || 'list');
   const showSettings     = useStore(state => state.ui.showSettings);
   const selectedTaskIds  = useStore(useShallow(state => state.ui.selectedTaskIds));
   const updateUI         = useStore(state => state.updateUI);
@@ -134,16 +136,28 @@ export const AppHeader = memo(({ today }) => {
                 </button>
               )}
               {activeTab === 'daily' && (
-                <select
-                  value={sortMode}
-                  onChange={handleSortChange}
-                  className="bg-stone-800 text-amber-500 border border-stone-700 text-[9px] font-black uppercase tracking-widest px-2 py-2 rounded-lg outline-none cursor-pointer"
-                >
-                  <option value="none">Порядок</option>
-                  <option value="time">Время</option>
-                  <option value="priority">Приоритет</option>
-                  <option value="tags">Теги</option>
-                </select>
+                <div className="flex gap-1.5 items-center">
+                  <select
+                    value={sortMode}
+                    onChange={handleSortChange}
+                    className="bg-stone-800 text-amber-500 border border-stone-700 text-[9px] font-black uppercase tracking-widest px-2 py-2 rounded-lg outline-none cursor-pointer"
+                  >
+                    <option value="none">Порядок</option>
+                    <option value="time">Время</option>
+                    <option value="priority">Приоритет</option>
+                    <option value="tags">Теги</option>
+                  </select>
+                  <button
+                    onClick={() => {
+                      triggerLightImpact();
+                      updateUI({ viewMode: viewMode === 'list' ? 'board' : 'list' });
+                    }}
+                    className="p-2 bg-stone-800 border border-stone-700 rounded-lg text-amber-500 hover:bg-stone-700 transition-all flex items-center justify-center"
+                    title={viewMode === 'list' ? "Режим доски" : "Режим списка"}
+                  >
+                    {viewMode === 'list' ? <Kanban className="w-3.5 h-3.5" /> : <List className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
               )}
               <button
                 onClick={handleToggleSettings}

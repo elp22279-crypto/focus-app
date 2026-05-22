@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { z } from 'zod';
+import { getSecureApiKey } from '../store/useStore.js';
 
 const subtasksSchema = z.object({
   subtasks: z.array(z.object({
@@ -26,7 +27,8 @@ export class MissingApiKeyError extends Error {
   }
 }
 
-export const generateSubtasksWithAI = async (parentTaskTitle, apiKey, signal) => {
+export const generateSubtasksWithAI = async (parentTaskTitle, signal) => {
+  const apiKey = await getSecureApiKey();
   if (!apiKey) {
     throw new MissingApiKeyError();
   }
@@ -99,7 +101,8 @@ export const generateSubtasksWithAI = async (parentTaskTitle, apiKey, signal) =>
   }
 };
 
-export const generateAnalyticsWithAI = async (payload, periodDays, apiKey, signal) => {
+export const generateAnalyticsWithAI = async (payload, periodDays, signal) => {
+  const apiKey = await getSecureApiKey();
   if (!apiKey) {
     throw new MissingApiKeyError();
   }

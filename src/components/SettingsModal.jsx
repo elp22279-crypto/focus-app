@@ -24,7 +24,7 @@ export const SettingsModal = () => {
   const deleteTag       = useStore(state => state.deleteTag);
   const updateTag       = useStore(state => state.updateTag);
   
-  const apiKey          = useStore(state => state.apiKey);
+  const hasApiKey       = useStore(state => state.hasApiKey);
   const setApiKey       = useStore(state => state.setApiKey);
   const restoreBackup   = useStore(state => state.restoreBackup);
 
@@ -207,7 +207,7 @@ export const SettingsModal = () => {
                 <Key className="w-3 h-3" /> Gemini API-ключ
               </label>
               <div className="flex items-center gap-2 mb-3">
-                {apiKey
+                {hasApiKey
                   ? <span className="flex items-center gap-1.5 text-[10px] font-bold text-emerald-400"><ShieldCheck className="w-3.5 h-3.5" /> Ключ активен</span>
                   : <span className="flex items-center gap-1.5 text-[10px] font-bold text-stone-500"><ShieldOff className="w-3.5 h-3.5" /> Ключ не задан</span>
                 }
@@ -222,7 +222,7 @@ export const SettingsModal = () => {
                     value={keyInput}
                     onChange={e => setKeyInput(e.target.value)}
                     onKeyDown={e => e.key === 'Enter' && handleApplyKey()}
-                    placeholder={apiKey ? '••••••••  (введите новый для замены)' : 'AIzaSy...'}
+                    placeholder={hasApiKey ? '••••••••  (введите новый для замены)' : 'AIzaSy...'}
                     className="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-xs font-mono text-stone-200 placeholder-stone-600 outline-none focus:border-violet-700 transition-colors shadow-inner pr-9"
                     autoComplete="off" spellCheck={false}
                   />
@@ -237,7 +237,7 @@ export const SettingsModal = () => {
                   className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-violet-900/50 border border-violet-700 text-violet-300 text-[10px] font-black uppercase tracking-widest rounded-lg hover:bg-violet-800/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
                   <CheckCircle2 className="w-3 h-3" /> Применить
                 </button>
-                <button id="api-key-remove-btn" onClick={handleRemoveKey} disabled={!apiKey}
+                <button id="api-key-remove-btn" onClick={handleRemoveKey} disabled={!hasApiKey}
                   className="flex items-center justify-center gap-1.5 px-3 py-2 bg-red-950/30 border border-red-900 text-red-400 text-[10px] font-black uppercase tracking-widest rounded-lg hover:bg-red-900/40 disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                   <Trash2 className="w-3 h-3" />
                 </button>

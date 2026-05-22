@@ -54,7 +54,7 @@ export const AnalyticsView = memo(() => {
   const aiAnalyticsCache = useStore(state => state.aiAnalyticsCache);
   const setAiAnalyticsCache = useStore(state => state.setAiAnalyticsCache);
   const updateUI = useStore(state => state.updateUI);
-  const apiKey = useStore(state => state.apiKey);
+  const hasApiKey = useStore(state => state.hasApiKey);
   
   const day   = useAnalyticsData(1);
   const week  = useAnalyticsData(7);
@@ -83,7 +83,7 @@ export const AnalyticsView = memo(() => {
   };
 
   const handleGenerateAI = async () => {
-    if (!apiKey) {
+    if (!hasApiKey) {
       triggerWarning();
       updateUI({ showSettings: true });
       return;
@@ -118,7 +118,7 @@ export const AnalyticsView = memo(() => {
         }
       });
 
-      const responseData = await generateAnalyticsWithAI(payload, aiPeriod, apiKey, abortControllerRef.current.signal);
+      const responseData = await generateAnalyticsWithAI(payload, aiPeriod, abortControllerRef.current.signal);
       setAiAnalyticsCache(aiPeriod, responseData);
       triggerSuccess();
     } catch (err) {

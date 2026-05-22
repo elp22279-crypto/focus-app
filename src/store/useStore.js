@@ -3,6 +3,8 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { generateId, calculatePoints, calculateNextDate } from '../utils/helpers.js';
 import { Preferences } from '@capacitor/preferences';
+import { App } from '@capacitor/app';
+import { SecureStoragePlugin } from 'capacitor-secure-storage-plugin';
 import { getDescendantIds, insertNode, removeNode, moveNode, cloneSubgraph } from '../utils/graphUtils.js';
 import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval';
 
@@ -31,9 +33,9 @@ const wouldCreateCycle = (taskId, newParentId, byId) => {
 // ---------------------------------------------------------------------------
 const SECURE_KEY_NAME = 'focus_app_api_key';
 
-const secureRead = async () => {
+export const getSecureApiKey = async () => {
   try {
-    const { value } = await Preferences.get({ key: SECURE_KEY_NAME });
+    const { value } = await SecureStoragePlugin.get({ key: SECURE_KEY_NAME });
     return value ?? null;
   } catch {
     return sessionStorage.getItem(SECURE_KEY_NAME);
@@ -43,9 +45,9 @@ const secureRead = async () => {
 const secureWrite = async (value) => {
   try {
     if (value) {
-      await Preferences.set({ key: SECURE_KEY_NAME, value });
+      await SecureStoragePlugin.set({ key: SECURE_KEY_NAME, value });
     } else {
-      await Preferences.remove({ key: SECURE_KEY_NAME });
+      await SecureStoragePlugin.remove({ key: SECURE_KEY_NAME });
     }
   } catch {
     if (value) sessionStorage.setItem(SECURE_KEY_NAME, value);
@@ -79,21 +81,39 @@ export const useStore = create(
       _hasHydrated: false,
       setHasHydrated: (status) => set({ _hasHydrated: status }),
 
-      // API-ключ хранится в памяти; персистентность — через secureWrite/secureRead,
-      // НЕ через основной localStorage-бандл.
-      apiKey: null,
+      // API-ключ не хранится в памяти; персистентность — через Secure Storage,
+      // В сторе только флаг наличия для UI.
+      hasApiKey: false,
 
-      /** Сохранить API-ключ в защищённом хранилище и в памяти стора. */
-      setApiKey: (key) => {
+      /** Сохранить API-ключ в защищённом хранилище. */
+      setApiKey: async (key) => {
         const trimmed = key ? key.trim() : null;
-        secureWrite(trimmed || null);
-        set({ apiKey: trimmed || null });
+        await secureWrite(trimmed || null);
+        set({ hasApiKey: !!trimmed });
       },
 
-      /** Загрузить ключ из защищённого хранилища при старте приложения. */
+      /** Мигрировать ключ из Preferences и загрузить статус из защищённого хранилища. */
+      checkAndMigrateApiKey: async () => {
+        let oldKey = null;
+        try {
+          const { value } = await Preferences.get({ key: SECURE_KEY_NAME });
+          oldKey = value;
+        } catch { /* noop */ }
+        
+        if (oldKey) {
+          await secureWrite(oldKey);
+          try { await Preferences.remove({ key: SECURE_KEY_NAME }); } catch {}
+          set({ hasApiKey: true });
+          return;
+        }
+
+        const currentKey = await getSecureApiKey();
+        set({ hasApiKey: !!currentKey });
+      },
+
+      /** Загрузить API-ключ из защищённого хранилища. */
       loadApiKey: async () => {
-        const stored = await secureRead();
-        if (stored) set({ apiKey: stored });
+        await get().checkAndMigrateApiKey();
       },
 
       // ── Undo/Snackbar ──────────────────────────────────────────────────
@@ -192,6 +212,7 @@ export const useStore = create(
         activeTab: 'daily',
         selectedDate: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })(),
         sortMode: 'none',
+        viewMode: 'list',
         expandedNodes: [],
         editingNodeId: null,
         showSettings: false,
@@ -362,6 +383,17 @@ export const useStore = create(
             let newById = { ...s.byId, ...clonedById };
             newById[id] = { ...newById[id], done: false, date: nextDate, completedAt: null };
             
+            // Помечаем клон корневой задачи как выполненный и скрытый
+            if (newById[newRootId]) {
+              newById[newRootId] = {
+                ...newById[newRootId],
+                done: true,
+                completedAt: Date.now(),
+                isHidden: true,
+                repeatType: 'none'
+              };
+            }
+            
             // Также продвигаем даты потомков шаблона (используя idMapping для O(1) доступа)
             if (deltaMs > 0) {
               Object.keys(idMapping).forEach(childId => {
@@ -399,6 +431,30 @@ export const useStore = create(
         // ── Обычное завершение: soft-скрытие + undo-окно 3 сек ────────
         set((s) => ({
           byId: { ...s.byId, [id]: { ...task, done: true, completedAt: Date.now(), isHidden: true } }
+        }));
+
+        set(s => ({
+          pendingActions: {
+            ...s.pendingActions,
+            [id]: { type: 'complete', taskSnapshot: task, startedAt: Date.now() }
+          }
+        }));
+
+        const timerId = setTimeout(() => {
+          get()._commitPending(id);
+        }, 3000);
+        actionTimers.set(id, timerId);
+      },
+
+      completePermanently: (id) => {
+        const state = get();
+        const task = state.byId[id];
+        if (!task) return;
+
+        const updatedTask = { ...task, repeatType: 'none' };
+
+        set((s) => ({
+          byId: { ...s.byId, [id]: { ...updatedTask, done: true, completedAt: Date.now(), isHidden: true } }
         }));
 
         set(s => ({
@@ -582,8 +638,20 @@ export const useStore = create(
             console.error('Store hydration error:', error);
           }
           if (state) {
+            const idsToRemove = Object.keys(state.byId).filter(id => state.byId[id].isHidden);
+            if (idsToRemove.length > 0) {
+              let newById = { ...state.byId };
+              let newRootIds = [...state.rootIds];
+              idsToRemove.forEach(id => {
+                const res = removeNode(newById, newRootIds, id);
+                newById = res.newById;
+                newRootIds = res.newRootIds;
+              });
+              useStore.setState({ byId: newById, rootIds: newRootIds, graphVersion: state.graphVersion + 1 });
+            }
+
             try {
-              await state.loadApiKey();
+              await state.checkAndMigrateApiKey();
             } catch (err) {
               console.error('Error loading API key:', err);
             }
@@ -593,10 +661,10 @@ export const useStore = create(
           }
         };
       },
-      // Явно исключаем apiKey и undo-состояние из персистентности.
+      // Явно исключаем hasApiKey и undo-состояние из персистентности.
       partialize: (state) => {
         // eslint-disable-next-line no-unused-vars
-        const { _hasHydrated, setHasHydrated, apiKey, loadApiKey, setApiKey, pendingActions, _commitPending, undoAction, ...rest } = state;
+        const { _hasHydrated, setHasHydrated, hasApiKey, checkAndMigrateApiKey, setApiKey, pendingActions, _commitPending, undoAction, ...rest } = state;
         return rest;
       },
       // Декларативная миграция данных
@@ -615,17 +683,34 @@ export const useStore = create(
         return { ...rest, tags: rest.tags || ['#дома', '#выезд'], byId: cleanedById };
       },
       merge: (persistedState, currentState) => {
+        const state = currentState || {};
+        const stateUi = state.ui || {
+          activeTab: 'daily',
+          selectedDate: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })(),
+          sortMode: 'none',
+          viewMode: 'list',
+          expandedNodes: [],
+          editingNodeId: null,
+          showSettings: false,
+          showOverdue: false,
+          baseViewMode: 'active',
+          baseFilterDate: '',
+          baseFilterDeadline: '',
+          selectedTaskIds: [],
+          isRecording: false
+        };
+        const persisted = persistedState || {};
         return {
-          ...currentState,
-          ...persistedState,
-          // apiKey и pendingActions никогда не берём из persistedState
-          apiKey: null,
+          ...state,
+          ...persisted,
+          // hasApiKey и pendingActions никогда не берём из persistedState
+          hasApiKey: false,
           pendingActions: {},
           ui: {
-            ...currentState.ui,
-            ...(persistedState.ui || {}),
+            ...stateUi,
+            ...(persisted.ui || {}),
             // Защита от зависания состояния сессии
-            selectedDate: currentState.ui.selectedDate,
+            selectedDate: stateUi.selectedDate,
             activeTab: 'daily',
             editingNodeId: null,
             showSettings: false,
@@ -639,3 +724,14 @@ export const useStore = create(
     }
   )
 );
+
+// ── App Lifecycle (Zombie Tasks Cleanup) ──────────────────────────────────
+App.addListener('appStateChange', ({ isActive }) => {
+  if (!isActive) {
+    const state = useStore.getState();
+    const pendingIds = Object.keys(state.pendingActions);
+    if (pendingIds.length > 0) {
+      pendingIds.forEach(id => state._commitPending(id));
+    }
+  }
+});

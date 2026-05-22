@@ -61,6 +61,7 @@ export const TaskEditor = () => {
   const updateTask  = useStore(state => state.updateTask);
   const updateUI    = useStore(state => state.updateUI);
   const deleteTask  = useStore(state => state.deleteTask);
+  const completePermanently = useStore(state => state.completePermanently);
   const addTask     = useStore(state => state.addTask);
   const addTasksBatch = useStore(state => state.addTasksBatch);
   const categories  = useStore(state => state.categories);
@@ -143,8 +144,7 @@ export const TaskEditor = () => {
     abortControllerRef.current = new AbortController();
     
     try {
-      const apiKey = useStore.getState().apiKey;
-      const generatedTasks = await generateSubtasksWithAI(draft.title, apiKey, abortControllerRef.current.signal);
+      const generatedTasks = await generateSubtasksWithAI(draft.title, abortControllerRef.current.signal);
       
       if (generatedTasks?.length > 0) {
         triggerSuccess();
@@ -516,6 +516,7 @@ export const TaskEditor = () => {
           <button
             onClick={() => { triggerWarning(); deleteTask(task.id); updateUI({ editingNodeId: null }); }}
             className="bg-red-950/50 border border-red-900 text-red-500 p-4 rounded-xl hover:bg-red-900 w-14 flex items-center justify-center flex-shrink-0"
+            title="Удалить задачу"
           >
             <Trash2 className="w-5 h-5" />
           </button>
@@ -526,9 +527,23 @@ export const TaskEditor = () => {
               updateUI({ editingNodeId: null });
             }}
             className="bg-purple-950/50 border border-purple-900 text-purple-500 p-4 rounded-xl hover:bg-purple-900 w-14 flex items-center justify-center flex-shrink-0"
+            title="Дублировать задачу"
           >
             <Copy className="w-5 h-5" />
           </button>
+          {draft.repeatType && draft.repeatType !== 'none' && (
+            <button
+              onClick={() => {
+                triggerSuccess();
+                completePermanently(task.id);
+                updateUI({ editingNodeId: null });
+              }}
+              className="bg-emerald-950/50 border border-emerald-900 text-emerald-400 px-4 rounded-xl hover:bg-emerald-900 font-black text-[10px] uppercase tracking-wider flex items-center justify-center flex-shrink-0"
+              title="Завершить окончательно (без повторений)"
+            >
+              Завершить навсегда
+            </button>
+          )}
           <button
             onClick={saveAndClose}
             disabled={!draft.title?.trim()}
