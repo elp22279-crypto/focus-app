@@ -100,7 +100,7 @@ const VoiceTaskFab = memo(() => {
   const handleVoiceInput = useCallback(async () => {
     if (isRecording) {
       triggerLightImpact();
-      await stopVoiceCapture();
+      stopVoiceCapture();
       updateUI({ isRecording: false });
       return;
     }
@@ -122,9 +122,9 @@ const VoiceTaskFab = memo(() => {
       }
     }
 
-    await stopVoiceCapture();
+    stopVoiceCapture();
     updateUI({ isRecording: false });
-  }, [updateUI, addTask, activeTab, selectedDate]);
+  }, [updateUI, addTask, activeTab, selectedDate, isRecording]);
 
   if (isSelecting) return null;
 
